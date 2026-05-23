@@ -15,13 +15,14 @@ import mediaRoutes from './modules/media/media.routes.js';
 import streamRoutes from './modules/stream/stream.routes.js';
 import saveRoutes from './modules/save/save.routes.js';
 import libraryRoutes from './modules/library/library.routes.js';
+import adminRoutes from './modules/admin/admin.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger,
     disableRequestLogging: false,
     trustProxy: true,
-    bodyLimit: 1 * 1024 * 1024, // 1 MB; streaming routes don't read bodies
+    bodyLimit: 1 * 1024 * 1024,
   });
 
   await app.register(sensible);
@@ -37,6 +38,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(streamRoutes, { prefix: '/api/v1/stream' });
   await app.register(saveRoutes, { prefix: '/api/v1/save' });
   await app.register(libraryRoutes, { prefix: '/api/v1/library' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
 
   app.get('/', async () => ({ name: 'fyphost', env: env.NODE_ENV }));
 

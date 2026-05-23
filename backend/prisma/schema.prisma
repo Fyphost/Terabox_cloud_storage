@@ -17,7 +17,7 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Users
+// Users + auth
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum UserKind {
@@ -25,20 +25,65 @@ enum UserKind {
   REGISTERED
 }
 
-model User {
-  id          String     @id
-  kind        UserKind   @default(ANON)
-  email       String?    @unique
-  displayName String?
-  passwordHash String?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  lastSeenAt  DateTime?
+enum UserRole {
+  USER
+  ADMIN
+}
 
-  saved       SavedMedia[]
-  sessions    StreamSession[]
+enum EmailTokenKind {
+  VERIFY
+  RESET
+}
+
+model User {
+  id              String     @id
+  kind            UserKind   @default(ANON)
+  role            UserRole   @default(USER)
+  email           String?    @unique
+  emailVerifiedAt DateTime?
+  displayName     String?
+  passwordHash    String?
+  storageQuotaBytes BigInt   @default(5368709120) // 5 GiB default
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  lastSeenAt      DateTime?
+
+  saved         SavedMedia[]
+  sessions      StreamSession[]
+  refreshTokens RefreshToken[]
+  emailTokens   EmailToken[]
 
   @@index([lastSeenAt])
+}
+
+model EmailToken {
+  id         String         @id
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind       EmailTokenKind
+  tokenHash  String         @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime       @default(now())
+
+  @@index([userId, kind])
+  @@index([expiresAt])
+}
+
+model RefreshToken {
+  id            String    @id
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash     String    @unique
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime  @default(now())
+  rotatedFromId String?
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,20 +111,19 @@ enum VariantContainer {
 }
 
 model Media {
-  id          String     @id
-  sourceHash  String     @unique          // sha256(normalized source URL)
-  sourceUrl   String                       // original URL, for refresh
-  name        String
-  kind        MediaKind  @default(VIDEO)
-  sizeBytes   BigInt?                      // sum of canonical variant or upstream-reported
-  thumbnailUrl String?
-  durationSec Int?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  // last successful re-extract; URLs older than X are refreshed on demand
-  metadataRefreshedAt DateTime @default(now())
+  id                  String     @id
+  sourceHash          String     @unique          // sha256(normalized source URL)
+  sourceUrl           String                       // original URL, for refresh
+  name                String
+  kind                MediaKind  @default(VIDEO)
+  sizeBytes           BigInt?                      // sum of canonical variant or upstream-reported
+  thumbnailUrl        String?
+  durationSec         Int?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  metadataRefreshedAt DateTime   @default(now())
 
-  variants    MediaVariant[]
+  variants            MediaVariant[]
 
   @@index([createdAt])
 }
@@ -96,16 +140,14 @@ model MediaVariant {
   bitrateBps    Int?
   sizeBytes     BigInt?
 
-  // Upstream URLs (refreshable, may expire)
   upstreamPlaylistUrl String?                          // m3u8
   upstreamFileUrl     String?                          // direct mp4/etc
   upstreamRefreshedAt DateTime @default(now())
 
-  // Bytes-location state
   state         VariantState     @default(EPHEMERAL)
-  storageKey    String?                                // path inside storage backend when PERSISTED
-  sha256        String?                                // verified on save
-  cachedBytes   BigInt           @default(0)           // current cache footprint
+  storageKey    String?
+  sha256        String?
+  cachedBytes   BigInt           @default(0)
 
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
@@ -138,7 +180,7 @@ model SavedMedia {
 
   state           SavedState    @default(PENDING)
   progress        Float         @default(0) // 0..1
-  jobId           String?                    // BullMQ job id
+  jobId           String?
   error           String?
   createdAt       DateTime      @default(now())
   completedAt     DateTime?
@@ -181,15 +223,15 @@ model CacheEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model StreamSession {
-  id            String        @id
-  userId        String?
-  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id             String        @id
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   mediaVariantId String
-  ip            String?
-  userAgent     String?
-  issuedAt      DateTime      @default(now())
-  expiresAt     DateTime
-  revokedAt     DateTime?
+  ip             String?
+  userAgent      String?
+  issuedAt       DateTime      @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
 
   @@index([mediaVariantId, expiresAt])
   @@index([userId])

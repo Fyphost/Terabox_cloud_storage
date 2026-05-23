@@ -6,6 +6,8 @@ import { Loader2, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useIngest } from '@/hooks/use-ingest';
+import { ApiError } from '@/lib/api/client';
+import { toast } from '@/lib/store/ui.store';
 
 export default function UrlAnalyzer() {
   const router = useRouter();
@@ -16,40 +18,56 @@ export default function UrlAnalyzer() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!/^https?:\/\//i.test(url.trim())) {
+    const cleaned = url.trim();
+    if (!/^https?:\/\//i.test(cleaned)) {
       setError('Paste a valid TeraBox link.');
       return;
     }
     try {
-      const media = await ingest.mutateAsync(url.trim());
+      const media = await ingest.mutateAsync(cleaned);
+      if (!media?.id) {
+        setError('Could not analyze that link.');
+        return;
+      }
       router.push(`/m/${media.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to analyze.');
+      const msg = err instanceof ApiError ? err.message : 'Failed to analyze.';
+      setError(msg);
+      toast({ variant: 'error', title: 'Analyze failed', description: msg });
     }
   };
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
-      <Input
-        inputMode="url"
-        autoCapitalize="none"
-        autoCorrect="off"
-        spellCheck={false}
-        placeholder="Paste a TeraBox URL"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        aria-label="TeraBox URL"
-      />
-      <Button type="submit" size="lg" disabled={ingest.isPending} className="sm:w-auto">
-        {ingest.isPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-        ) : (
-          <Wand2 className="h-4 w-4" aria-hidden />
-        )}
-        Analyze
-      </Button>
+    <form
+      onSubmit={onSubmit}
+      className="rounded-2xl border border-border bg-surface p-2 shadow-card md:p-3"
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+        <Input
+          inputMode="url"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="Paste a TeraBox URL"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          aria-label="TeraBox URL"
+          className="h-12 flex-1 border-transparent bg-transparent shadow-none text-base focus:border-transparent focus:ring-0"
+        />
+        <Button type="submit" size="lg" disabled={ingest.isPending} className="sm:w-auto">
+          {ingest.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+          ) : (
+            <Wand2 className="h-4 w-4" aria-hidden />
+          )}
+          Analyze
+        </Button>
+      </div>
       {error && (
-        <p role="alert" className="text-sm text-red-400 sm:basis-full">
+        <p
+          role="alert"
+          className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger"
+        >
           {error}
         </p>
       )}

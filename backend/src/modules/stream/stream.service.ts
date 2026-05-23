@@ -1,21 +1,15 @@
-import { request } from 'undici';
 import { prisma } from '../../config/prisma.js';
 import { getRedis } from '../../config/redis.js';
 import { AppError } from '../../lib/errors.js';
 import { upstreamRequest } from '../../lib/http.js';
-import { env } from '../../config/env.js';
 import {
   rewriteMediaPlaylist,
   type RewriteMediaResult,
 } from './hls.rewriter.js';
-import { buildSignedPath, sign } from '../../services/signing/signed-url.js';
+import { buildRelativeStreamUrl } from '../../services/signing/signed-url.js';
 
 const SEGMENT_INDEX_TTL_SEC = 6 * 3600;
 
-/**
- * For each variant, hold a Redis-backed list mapping segment index → upstream URL.
- * Built when we serve the playlist; consumed when serving each segment.
- */
 function segIndexKey(variantId: string): string {
   return `seg:idx:${variantId}`;
 }
@@ -32,13 +26,16 @@ export async function loadVariant(variantId: string) {
 /**
  * Fetch upstream m3u8, rewrite all segment URIs to point at our /segment/:n,
  * persist the segment-index map to Redis, and return the rewritten body.
+ *
+ * URLs in the rewritten body are RELATIVE so the player loads them on the
+ * same origin it fetched the master playlist from.
  */
 export async function buildRewrittenPlaylist(
   variantId: string,
   upstreamUrl: string,
   userId: string | null,
 ): Promise<{ body: string; segments: number }> {
-  const resp = await upstreamRequest(upstreamUrl, { method: 'GET' });
+  const resp = await upstreamRequest(upstreamUrl, { method: 'GET', maxRedirections: 5 });
   if (resp.statusCode >= 400) {
     resp.body.resume();
     throw new AppError(
@@ -48,27 +45,14 @@ export async function buildRewrittenPlaylist(
   }
   const text = await resp.body.text();
 
-  const baseUrl = upstreamUrl;
   const rewritten: RewriteMediaResult = rewriteMediaPlaylist(
     text,
-    baseUrl,
-    (seg) => {
-      const q = sign({ variantId, resource: `segment/${seg.index}`, userId });
-      return buildSignedPath(
-        `${env.PUBLIC_BASE_URL}/api/v1/stream/${variantId}/segment/${seg.index}`,
-        q,
-      );
-    },
-    (kind, originalUri, index) => {
-      const q = sign({ variantId, resource: `${kind}/${index}`, userId });
-      return buildSignedPath(
-        `${env.PUBLIC_BASE_URL}/api/v1/stream/${variantId}/${kind}/${index}`,
-        q,
-      );
-    },
+    upstreamUrl,
+    (seg) => buildRelativeStreamUrl(variantId, `segment/${seg.index}`, userId),
+    (kind, _originalUri, index) =>
+      buildRelativeStreamUrl(variantId, `${kind}/${index}`, userId),
   );
 
-  // Persist index → upstream URL map in Redis (LIST + EXPIRE).
   if (rewritten.segments.length > 0) {
     const redis = getRedis();
     const key = segIndexKey(variantId);

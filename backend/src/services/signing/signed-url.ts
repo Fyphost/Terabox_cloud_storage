@@ -52,6 +52,21 @@ export function buildSignedPath(basePath: string, q: SignedQuery): string {
   return `${basePath}?${usp.toString()}`;
 }
 
+/**
+ * Build a relative signed stream URL. Always emit relative paths so the
+ * browser uses the same origin it loaded the page from — this avoids CORS
+ * and lets a Next rewrite proxy forward to the API in dev.
+ */
+export function buildRelativeStreamUrl(
+  variantId: string,
+  resource: string,
+  userId: string | null,
+  ttlSec?: number,
+): string {
+  const q = sign({ variantId, resource, userId, ttlSec });
+  return buildSignedPath(`/api/v1/stream/${variantId}/${resource}`, q);
+}
+
 export interface VerifyParams {
   variantId: string;
   resource: string;
@@ -68,7 +83,6 @@ export function verify(params: VerifyParams): { userId: string | null } {
     throw new AppError('FORBIDDEN', 'Signature expired');
   }
   if (kv !== env.SIGNING_KEY_VERSION) {
-    // accept rolling, but only one version here
     throw new AppError('FORBIDDEN', 'Stale key version');
   }
 

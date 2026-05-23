@@ -1,8 +1,7 @@
 import type { Media, MediaVariant } from '@prisma/client';
-import { env } from '../../config/env.js';
 import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../lib/errors.js';
-import { buildSignedPath, sign } from '../../services/signing/signed-url.js';
+import { buildRelativeStreamUrl } from '../../services/signing/signed-url.js';
 
 export interface PresentedVariant {
   id: string;
@@ -29,11 +28,6 @@ export interface PresentedMedia {
   variants: PresentedVariant[];
 }
 
-function signedUrl(variantId: string, resource: string, userId: string | null): string {
-  const q = sign({ variantId, resource, userId });
-  return buildSignedPath(`${env.PUBLIC_BASE_URL}/api/v1/stream/${variantId}/${resource}`, q);
-}
-
 export async function presentMedia(
   media: Media,
   variants: MediaVariant[],
@@ -51,13 +45,13 @@ export async function presentMedia(
       bitrateBps: v.bitrateBps,
       sizeBytes: v.sizeBytes !== null ? Number(v.sizeBytes) : null,
       state: v.state,
-      playlistUrl: signedUrl(v.id, 'playlist.m3u8', userId),
-      fileUrl: signedUrl(v.id, 'file', userId),
-      downloadUrl: signedUrl(v.id, 'download', userId),
+      playlistUrl: buildRelativeStreamUrl(v.id, 'playlist.m3u8', userId),
+      fileUrl: buildRelativeStreamUrl(v.id, 'file', userId),
+      downloadUrl: buildRelativeStreamUrl(v.id, 'download', userId),
     }));
 
-  // Master URL points at a synthetic master endpoint that aggregates all variants.
-  const masterPlaylistUrl = `${env.PUBLIC_BASE_URL}/api/v1/media/${media.id}/master.m3u8`;
+  // Synthetic master endpoint aggregates all variants for hls.js. Relative.
+  const masterPlaylistUrl = `/api/v1/media/${media.id}/master.m3u8`;
 
   return {
     id: media.id,

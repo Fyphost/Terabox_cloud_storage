@@ -3,6 +3,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { ensureAnon } from '@/lib/api/auth';
+import { Toaster } from '@/components/ui/toast';
+import { LoginModal } from '@/components/auth/LoginModal';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(
@@ -15,14 +17,22 @@ export default function Providers({ children }: { children: React.ReactNode }) {
             refetchOnWindowFocus: false,
             retry: 1,
           },
+          mutations: { retry: 0 },
         },
       }),
   );
 
   useEffect(() => {
-    // Ensure an anonymous device-bound session exists (cookie-set by backend).
-    ensureAnon().catch(() => undefined);
+    // Ensure an anonymous device-bound session exists for ingest/streaming
+    // before the user has signed up. This sets a short-lived access cookie.
+    void ensureAnon().catch(() => undefined);
   }, []);
 
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={client}>
+      {children}
+      <Toaster />
+      <LoginModal />
+    </QueryClientProvider>
+  );
 }
