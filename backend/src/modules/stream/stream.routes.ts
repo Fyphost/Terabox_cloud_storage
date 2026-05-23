@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { AppError } from '../../lib/errors.js';
+import { buildContentDisposition, buildDownloadFilename } from '../../lib/filename.js';
 import { verify } from '../../services/signing/signed-url.js';
 import { cacheStorage, permanentStorage } from '../../services/storage/index.js';
 import { proxyStream, serveStored } from './stream.proxy.js';
@@ -20,6 +21,18 @@ const SignedQuery = z.object({
   kv: z.string(),
 });
 
+const STREAM_CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': 'Range, Content-Type',
+  'Access-Control-Expose-Headers':
+    'Content-Range, Accept-Ranges, Content-Length, Content-Type, ETag, Last-Modified',
+};
+
+function applyStreamCors(reply: { header: (k: string, v: string) => unknown }): void {
+  for (const [k, v] of Object.entries(STREAM_CORS_HEADERS)) reply.header(k, v);
+}
+
 function requireSig(req: { query: unknown }, variantId: string, resource: string): { userId: string | null } {
   const q = SignedQuery.safeParse(req.query);
   if (!q.success) throw new AppError('FORBIDDEN', 'Missing signature');
@@ -27,19 +40,22 @@ function requireSig(req: { query: unknown }, variantId: string, resource: string
 }
 
 const streamRoutes: FastifyPluginAsync = async (app) => {
+  // Preflight handler for HLS players that send OPTIONS for ranged segment fetches.
+  app.options('/:variantId/*', async (_req, reply) => {
+    applyStreamCors(reply);
+    reply.status(204).send();
+  });
+
   // ── HLS playlist ───────────────────────────────────────────────────────────
   app.get('/:variantId/playlist.m3u8', async (req, reply) => {
     const { variantId } = VariantParam.parse(req.params);
     requireSig(req, variantId, 'playlist.m3u8');
+    applyStreamCors(reply);
 
     const variant = await loadVariant(variantId);
 
-    // Persisted: serve the local rewritten playlist directly.
     if (variant.state === 'PERSISTED' && variant.storageKey) {
       const key = `${variant.storageKey}/playlist.m3u8`;
-      reply
-        .header('Content-Type', 'application/vnd.apple.mpegurl')
-        .header('Cache-Control', 'private, no-store');
       await serveStored(req, reply, permanentStorage(), key, {
         contentType: 'application/vnd.apple.mpegurl',
         cacheControl: 'private, no-store',
@@ -47,7 +63,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    // Otherwise: fetch upstream, rewrite, cache index map.
     if (!variant.upstreamPlaylistUrl) {
       throw new AppError('NOT_FOUND', 'No playlist available');
     }
@@ -78,10 +93,10 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
   app.get('/:variantId/segment/:index', async (req, reply) => {
     const { variantId, index } = SegmentParam.parse(req.params);
     requireSig(req, variantId, `segment/${index}`);
+    applyStreamCors(reply);
 
     const variant = await loadVariant(variantId);
 
-    // Persisted on disk?
     if (variant.state === 'PERSISTED' && variant.storageKey) {
       const key = `${variant.storageKey}/seg-${index}.ts`;
       await serveStored(req, reply, permanentStorage(), key, {
@@ -90,7 +105,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    // Cache hit on NVMe?
     const cacheKey = `${variantId}/seg-${index}.ts`;
     const cached = await cacheStorage().exists(cacheKey);
     if (cached) {
@@ -100,7 +114,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
-    // Otherwise proxy from upstream and tee into cache.
     const upstream = await lookupSegmentUpstream(variantId, index);
     if (!upstream) {
       throw new AppError('NOT_FOUND', 'Segment index unknown — reload playlist');
@@ -114,7 +127,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
       refreshOnce: async () => {
         const refreshed = await refreshVariantUpstream(variantId);
         if (!refreshed) return null;
-        // Re-prime the segment index (the new playlist may have different URLs).
         await buildRewrittenPlaylist(variantId, refreshed, req.userId ?? null);
         return lookupSegmentUpstream(variantId, index);
       },
@@ -125,6 +137,7 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
   app.get('/:variantId/file', async (req, reply) => {
     const { variantId } = VariantParam.parse(req.params);
     requireSig(req, variantId, 'file');
+    applyStreamCors(reply);
 
     const variant = await loadVariant(variantId);
 
@@ -154,17 +167,23 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  // ── Download (Content-Disposition) ────────────────────────────────────────
+  // ── Download (Content-Disposition with RFC5987 filename) ──────────────────
   app.get('/:variantId/download', async (req, reply) => {
     const { variantId } = VariantParam.parse(req.params);
     requireSig(req, variantId, 'download');
+    applyStreamCors(reply);
 
     const variant = await loadVariant(variantId);
-    const filename = `${variant.media.name || 'media'}-${variant.quality}.mp4`;
+    const filename = buildDownloadFilename({
+      baseName: variant.media.name || 'media',
+      quality: variant.quality,
+      container: variant.container,
+    });
+    const contentDisposition = buildContentDisposition('attachment', filename);
+    reply.header('Content-Disposition', contentDisposition);
 
     if (variant.state === 'PERSISTED' && variant.storageKey) {
       await serveStored(req, reply, permanentStorage(), `${variant.storageKey}/file.bin`, {
-        downloadFilename: filename,
         cacheControl: 'private, no-store',
       });
       return;
@@ -173,7 +192,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
     const cacheKey = `${variantId}/file.bin`;
     if (await cacheStorage().exists(cacheKey)) {
       await serveStored(req, reply, cacheStorage(), cacheKey, {
-        downloadFilename: filename,
         cacheControl: 'private, no-store',
       });
       return;
@@ -182,10 +200,6 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
     const url = variant.upstreamFileUrl;
     if (!url) throw new AppError('NOT_FOUND', 'Download not available');
 
-    reply.header(
-      'Content-Disposition',
-      `attachment; filename="${filename.replace(/[\r\n"\\]/g, '_')}"`,
-    );
     await proxyStream(req, reply, {
       upstreamUrl: url,
       defaultContentType: 'application/octet-stream',

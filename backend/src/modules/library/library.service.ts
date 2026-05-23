@@ -1,6 +1,9 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { presentMedia, type PresentedMedia } from '../media/media.service.js';
+
+export type LibrarySort = 'recent' | 'oldest' | 'name' | 'size';
 
 export interface LibraryEntry {
   savedMediaId: string;
@@ -14,19 +17,38 @@ export interface LibraryEntry {
 
 export async function listLibrary(
   userId: string,
-  opts: { search?: string; cursor?: string; take?: number } = {},
+  opts: { search?: string; cursor?: string; take?: number; sort?: LibrarySort } = {},
 ): Promise<{ items: LibraryEntry[]; nextCursor: string | null }> {
   const take = Math.min(Math.max(opts.take ?? 20, 1), 50);
+  const sort: LibrarySort = opts.sort ?? 'recent';
+
+  const where: Prisma.SavedMediaWhereInput = {
+    userId,
+    ...(opts.search
+      ? { variant: { media: { name: { contains: opts.search, mode: 'insensitive' } } } }
+      : {}),
+  };
+
+  // Cursor pagination requires a deterministic ordering. We always include id
+  // as a tiebreaker so the cursor uniquely picks up where the page left off.
+  const orderBy: Prisma.SavedMediaOrderByWithRelationInput[] = (() => {
+    switch (sort) {
+      case 'oldest':
+        return [{ createdAt: 'asc' }, { id: 'asc' }];
+      case 'name':
+        return [{ variant: { media: { name: 'asc' } } }, { id: 'asc' }];
+      case 'size':
+        return [{ variant: { sizeBytes: 'desc' } }, { id: 'desc' }];
+      case 'recent':
+      default:
+        return [{ createdAt: 'desc' }, { id: 'desc' }];
+    }
+  })();
 
   const saved = await prisma.savedMedia.findMany({
-    where: {
-      userId,
-      ...(opts.search
-        ? { variant: { media: { name: { contains: opts.search, mode: 'insensitive' } } } }
-        : {}),
-    },
+    where,
     include: { variant: { include: { media: { include: { variants: true } } } } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    orderBy,
     take: take + 1,
     ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
   });
@@ -49,20 +71,26 @@ export async function listLibrary(
   return { items, nextCursor };
 }
 
-export async function deleteLibraryEntry(savedMediaId: string, userId: string): Promise<void> {
-  const sm = await prisma.savedMedia.findUnique({ where: { id: savedMediaId } });
-  if (!sm || sm.userId !== userId) throw new AppError('NOT_FOUND', 'Library entry not found');
-
-  await prisma.savedMedia.delete({ where: { id: savedMediaId } });
-
-  // If no other user references the variant, mark for deletion.
-  const remaining = await prisma.savedMedia.count({
-    where: { mediaVariantId: sm.mediaVariantId },
+export async function deleteLibraryEntries(savedMediaIds: string[], userId: string): Promise<number> {
+  const owned = await prisma.savedMedia.findMany({
+    where: { id: { in: savedMediaIds }, userId },
+    select: { id: true, mediaVariantId: true },
   });
-  if (remaining === 0) {
-    await prisma.mediaVariant.update({
-      where: { id: sm.mediaVariantId },
-      data: { state: 'PENDING_DELETE' },
-    });
+  if (owned.length === 0) {
+    throw new AppError('NOT_FOUND', 'No matching library entries');
   }
+
+  await prisma.savedMedia.deleteMany({ where: { id: { in: owned.map((o) => o.id) } } });
+
+  const variantIds = Array.from(new Set(owned.map((o) => o.mediaVariantId)));
+  for (const variantId of variantIds) {
+    const remaining = await prisma.savedMedia.count({ where: { mediaVariantId: variantId } });
+    if (remaining === 0) {
+      await prisma.mediaVariant
+        .update({ where: { id: variantId }, data: { state: 'PENDING_DELETE' } })
+        .catch(() => undefined);
+    }
+  }
+
+  return owned.length;
 }

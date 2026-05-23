@@ -1,7 +1,7 @@
 'use client';
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Settings2 } from 'lucide-react';
+import { Check, Settings2 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import type { HlsLevel } from '@/hooks/use-hls';
 
@@ -21,7 +21,7 @@ export default function QualitySelector({ levels, currentLevel, onChange }: Prop
         <button
           type="button"
           aria-label="Quality"
-          className="inline-flex h-9 items-center gap-1 rounded-md px-2 text-xs font-medium text-fg/80 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-accent"
+          className="inline-flex h-9 items-center gap-1 rounded-md px-2 text-xs font-medium text-white/90 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
           <Settings2 className="h-4 w-4" aria-hidden />
           <span>
@@ -35,14 +35,10 @@ export default function QualitySelector({ levels, currentLevel, onChange }: Prop
         <DropdownMenu.Content
           sideOffset={6}
           align="end"
-          className="z-50 min-w-[10rem] overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-lg"
+          className="z-50 min-w-[10rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900/95 p-1 text-white shadow-elevated backdrop-blur"
         >
-          <Item
-            label="Auto"
-            active={currentLevel === -1}
-            onSelect={() => onChange(-1)}
-          />
-          <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <Item label="Auto" active={currentLevel === -1} onSelect={() => onChange(-1)} />
+          <DropdownMenu.Separator className="my-1 h-px bg-white/10" />
           {sorted.map((l) => (
             <Item
               key={l.index}
@@ -57,7 +53,15 @@ export default function QualitySelector({ levels, currentLevel, onChange }: Prop
   );
 }
 
-function Item({ label, active, onSelect }: { label: string; active: boolean; onSelect: () => void }) {
+function Item({
+  label,
+  active,
+  onSelect,
+}: {
+  label: string;
+  active: boolean;
+  onSelect: () => void;
+}) {
   return (
     <DropdownMenu.Item
       onSelect={(e) => {
@@ -65,13 +69,12 @@ function Item({ label, active, onSelect }: { label: string; active: boolean; onS
         onSelect();
       }}
       className={cn(
-        'flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm outline-none',
+        'flex cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 text-sm outline-none',
         'data-[highlighted]:bg-white/10',
-        active && 'text-accent',
       )}
     >
       <span>{label}</span>
-      {active && <span className="ml-2 text-xs">●</span>}
+      {active && <Check className="h-4 w-4 text-primary" aria-hidden />}
     </DropdownMenu.Item>
   );
 }

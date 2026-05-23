@@ -18,7 +18,7 @@ const saveRoutes: FastifyPluginAsync = async (app) => {
       },
     },
     async (req, reply) => {
-      const userId = req.requireUser();
+      const userId = req.requireRegistered();
       const body = Body.parse(req.body);
       const result = await enqueueSave({ userId, ...body });
       return reply.status(202).send({ jobs: result });
@@ -26,7 +26,7 @@ const saveRoutes: FastifyPluginAsync = async (app) => {
   );
 
   app.get('/:savedMediaId', async (req) => {
-    const userId = req.requireUser();
+    const userId = req.requireRegistered();
     const { savedMediaId } = Params.parse(req.params);
     return getSaveJobStatus(savedMediaId, userId);
   });
