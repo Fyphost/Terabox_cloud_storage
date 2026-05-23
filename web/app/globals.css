@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 240 10% 4%;
+    --surface: 240 8% 8%;
+    --border: 240 6% 16%;
+    --muted: 240 4% 60%;
+    --fg: 0 0% 98%;
+    --accent: 200 95% 55%;
+    --accent-fg: 240 10% 4%;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-bg text-fg antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Disable text selection on player chrome */
+  .no-select {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Safe-area aware bottom nav for iOS */
+  .pb-safe {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+}

@@ -1,0 +1,223 @@
+// Fyphost — Database schema
+//
+// Conventions:
+// - Identifiers are short prefixed strings (med_, var_, ...) generated app-side.
+// - Source URL deduplication via Media.sourceHash.
+// - MediaVariant.state is the canonical bytes-location state machine.
+// - SavedMedia is the per-user claim on a variant; bytes are shared.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = []
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Users
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserKind {
+  ANON
+  REGISTERED
+}
+
+model User {
+  id          String     @id
+  kind        UserKind   @default(ANON)
+  email       String?    @unique
+  displayName String?
+  passwordHash String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  lastSeenAt  DateTime?
+
+  saved       SavedMedia[]
+  sessions    StreamSession[]
+
+  @@index([lastSeenAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Media + Variants
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum MediaKind {
+  VIDEO
+  AUDIO
+  IMAGE
+  OTHER
+}
+
+enum VariantState {
+  EPHEMERAL       // not on disk; proxy-only
+  CACHED          // on local NVMe cache
+  PERSISTED       // in permanent storage; never auto-evicted
+  PENDING_DELETE  // marked for storage-cleanup worker
+}
+
+enum VariantContainer {
+  HLS
+  MP4
+  OTHER
+}
+
+model Media {
+  id          String     @id
+  sourceHash  String     @unique          // sha256(normalized source URL)
+  sourceUrl   String                       // original URL, for refresh
+  name        String
+  kind        MediaKind  @default(VIDEO)
+  sizeBytes   BigInt?                      // sum of canonical variant or upstream-reported
+  thumbnailUrl String?
+  durationSec Int?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  // last successful re-extract; URLs older than X are refreshed on demand
+  metadataRefreshedAt DateTime @default(now())
+
+  variants    MediaVariant[]
+
+  @@index([createdAt])
+}
+
+model MediaVariant {
+  id            String           @id
+  mediaId       String
+  media         Media            @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  quality       String                                // "360p" | "480p" | "720p" | "1080p" | "audio"
+  container     VariantContainer @default(HLS)
+  width         Int?
+  height        Int?
+  bitrateBps    Int?
+  sizeBytes     BigInt?
+
+  // Upstream URLs (refreshable, may expire)
+  upstreamPlaylistUrl String?                          // m3u8
+  upstreamFileUrl     String?                          // direct mp4/etc
+  upstreamRefreshedAt DateTime @default(now())
+
+  // Bytes-location state
+  state         VariantState     @default(EPHEMERAL)
+  storageKey    String?                                // path inside storage backend when PERSISTED
+  sha256        String?                                // verified on save
+  cachedBytes   BigInt           @default(0)           // current cache footprint
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  saved         SavedMedia[]
+  cacheEntries  CacheEntry[]
+
+  @@unique([mediaId, quality])
+  @@index([state])
+  @@index([upstreamRefreshedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Saved (user library)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SavedState {
+  PENDING
+  DOWNLOADING
+  COMPLETE
+  FAILED
+}
+
+model SavedMedia {
+  id              String        @id
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaVariantId  String
+  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+
+  state           SavedState    @default(PENDING)
+  progress        Float         @default(0) // 0..1
+  jobId           String?                    // BullMQ job id
+  error           String?
+  createdAt       DateTime      @default(now())
+  completedAt     DateTime?
+
+  @@unique([userId, mediaVariantId])
+  @@index([userId, createdAt])
+  @@index([state])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache entries (NVMe hot cache)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum CacheKind {
+  HLS_PLAYLIST
+  HLS_SEGMENT
+  FILE
+}
+
+model CacheEntry {
+  id              String        @id
+  mediaVariantId  String
+  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+
+  kind            CacheKind
+  segmentKey      String                       // "playlist" | "seg-<n>" | "file"
+  storageKey      String                       // path under storage/cache/...
+  bytes           BigInt
+  contentType     String?
+
+  createdAt       DateTime      @default(now())
+  lastAccessedAt  DateTime      @default(now())
+
+  @@unique([mediaVariantId, segmentKey])
+  @@index([lastAccessedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream sessions (audit + revocation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model StreamSession {
+  id            String        @id
+  userId        String?
+  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  mediaVariantId String
+  ip            String?
+  userAgent     String?
+  issuedAt      DateTime      @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+
+  @@index([mediaVariantId, expiresAt])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Queue audit
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum QueueJobStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+  RETRYING
+}
+
+model QueueJob {
+  id          String         @id   // BullMQ job id
+  queue       String
+  type        String
+  payloadJson String
+  status      QueueJobStatus @default(QUEUED)
+  attempts    Int            @default(0)
+  error       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([queue, status])
+  @@index([createdAt])
+}
