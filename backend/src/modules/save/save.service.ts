@@ -1,8 +1,25 @@
+/**
+ * Save service.
+ *
+ * Concept model:
+ *
+ *   - SavedMedia: one per (user, media). Aggregates user's claim across all
+ *     qualities they've asked us to save. Created on first save call;
+ *     reused for every subsequent quality the same user picks.
+ *   - SavedVariant: join row tying a SavedMedia to a specific MediaVariant.
+ *     Adding a quality later just adds another SavedVariant; we never
+ *     duplicate Media or SavedMedia entries.
+ *
+ * The MediaVariant rows are the bytes-location source of truth, with their
+ * own state machine driven by save.worker.
+ */
+
 import { prisma } from '../../config/prisma.js';
 import { logger } from '../../lib/logger.js';
 import { AppError } from '../../lib/errors.js';
-import { newSavedId } from '../../lib/ids.js';
+import { newSavedId, newSavedVariantId } from '../../lib/ids.js';
 import { saveQueue, type SaveJobData } from '../../queues/save.queue.js';
+import { recomputeSavedMediaState } from './save.state.js';
 
 export interface SaveRequest {
   userId: string;
@@ -10,31 +27,26 @@ export interface SaveRequest {
   qualities: string[];
 }
 
-export interface SaveResponseEntry {
+export interface EnqueuedClaim {
   savedMediaId: string;
+  savedVariantId: string;
   variantId: string;
   quality: string;
-  jobId: string;
-  state: 'PENDING' | 'DOWNLOADING' | 'COMPLETE' | 'FAILED';
-  progress: number;
+  state: 'IN_FLIGHT' | 'ALREADY_PERSISTED';
+  jobId: string | null;
 }
 
-/**
- * Idempotent enqueue. Safe to call multiple times for the same (user, variant).
- *
- * - Verifies user exists (clear 401 instead of FK 500).
- * - Verifies media + variants exist.
- * - Upserts SavedMedia per variant (no race between find / create / update).
- * - Generates a fresh BullMQ job id every call so retries can't collide on
- *   `jobId` constraints in BullMQ.
- * - Returns COMPLETE immediately when the variant is already PERSISTED.
- */
-export async function enqueueSave(req: SaveRequest): Promise<SaveResponseEntry[]> {
+export interface EnqueueSaveResult {
+  savedMediaId: string;
+  claims: EnqueuedClaim[];
+}
+
+export async function enqueueSave(req: SaveRequest): Promise<EnqueueSaveResult> {
   if (req.qualities.length === 0) {
     throw new AppError('BAD_REQUEST', 'No qualities selected');
   }
 
-  // Authn integrity: the JWT may carry a sub for a user row that no longer exists.
+  // Authn integrity: JWT may carry a sub for a row that no longer exists.
   const user = await prisma.user.findUnique({ where: { id: req.userId } });
   if (!user) throw new AppError('UNAUTHORIZED', 'Sign in to save media');
   if (user.kind !== 'REGISTERED') {
@@ -51,55 +63,92 @@ export async function enqueueSave(req: SaveRequest): Promise<SaveResponseEntry[]
     throw new AppError('NOT_FOUND', 'No matching variants for selected qualities');
   }
 
-  const out: SaveResponseEntry[] = [];
+  // 1. Upsert one SavedMedia per (user, media).
+  const savedMedia = await prisma.savedMedia.upsert({
+    where: { userId_mediaId: { userId: req.userId, mediaId: req.mediaId } },
+    update: {},
+    create: {
+      id: newSavedId(),
+      userId: req.userId,
+      mediaId: req.mediaId,
+      state: 'PENDING',
+    },
+  });
 
+  const claims: EnqueuedClaim[] = [];
   for (const v of variants) {
     try {
-      // Already persisted → upsert SavedMedia COMPLETE and skip the queue.
-      if (v.state === 'PERSISTED') {
-        const sm = await prisma.savedMedia.upsert({
-          where: { userId_mediaVariantId: { userId: req.userId, mediaVariantId: v.id } },
-          update: { state: 'COMPLETE', progress: 1, error: null, completedAt: new Date() },
-          create: {
-            id: newSavedId(),
-            userId: req.userId,
+      // 2. Upsert SavedVariant for this user-variant pair.
+      const sv = await prisma.savedVariant.upsert({
+        where: {
+          savedMediaId_mediaVariantId: {
+            savedMediaId: savedMedia.id,
             mediaVariantId: v.id,
-            state: 'COMPLETE',
-            progress: 1,
-            completedAt: new Date(),
           },
-        });
-        out.push({
-          savedMediaId: sm.id,
+        },
+        update: {},
+        create: {
+          id: newSavedVariantId(),
+          savedMediaId: savedMedia.id,
+          mediaVariantId: v.id,
+        },
+      });
+
+      // 3a. Already PERSISTED → no work for this quality.
+      if (v.state === 'PERSISTED') {
+        claims.push({
+          savedMediaId: savedMedia.id,
+          savedVariantId: sv.id,
           variantId: v.id,
           quality: v.quality,
-          jobId: sm.jobId ?? 'completed',
-          state: 'COMPLETE',
-          progress: 1,
+          state: 'ALREADY_PERSISTED',
+          jobId: null,
         });
         continue;
       }
 
-      // Reserve the SavedMedia row (or reset it) before enqueuing.
-      const reserved = await prisma.savedMedia.upsert({
-        where: { userId_mediaVariantId: { userId: req.userId, mediaVariantId: v.id } },
-        update: { state: 'PENDING', progress: 0, error: null },
-        create: {
-          id: newSavedId(),
-          userId: req.userId,
-          mediaVariantId: v.id,
+      // 3b. If a job is already in flight for this variant, we don't
+      // enqueue a duplicate — the existing job will roll up our claim too.
+      const inFlight =
+        v.state === 'PENDING' ||
+        v.state === 'FETCHING' ||
+        v.state === 'DOWNLOADING' ||
+        v.state === 'GENERATING_HLS' ||
+        v.state === 'GENERATING_THUMBNAIL' ||
+        v.state === 'FINALIZING';
+
+      if (inFlight) {
+        claims.push({
+          savedMediaId: savedMedia.id,
+          savedVariantId: sv.id,
+          variantId: v.id,
+          quality: v.quality,
+          state: 'IN_FLIGHT',
+          jobId: null,
+        });
+        continue;
+      }
+
+      // 3c. Reset variant to PENDING and enqueue a fresh attempt.
+      await prisma.mediaVariant.update({
+        where: { id: v.id },
+        data: {
           state: 'PENDING',
+          pipelineStep: 'queued',
           progress: 0,
+          bytesDone: 0n,
+          bytesTotal: null,
+          speedBytesPerSec: null,
+          etaSec: null,
+          errorMessage: null,
         },
       });
 
-      // BullMQ rejects duplicate `jobId`. Use a per-call id so retries are safe.
       const job = await saveQueue.add(
         'download-variant',
-        { savedMediaId: reserved.id, variantId: v.id } satisfies SaveJobData,
+        { savedMediaId: savedMedia.id, variantId: v.id } satisfies SaveJobData,
         {
-          // unique-per-attempt; keep `save:` prefix for easy console filtering.
-          jobId: `save:${reserved.id}:${Date.now()}`,
+          jobId: `save:${sv.id}:${Date.now()}`,
           attempts: 5,
           backoff: { type: 'exponential', delay: 5_000 },
           removeOnComplete: { age: 3600, count: 1000 },
@@ -107,43 +156,148 @@ export async function enqueueSave(req: SaveRequest): Promise<SaveResponseEntry[]
         },
       );
 
-      await prisma.savedMedia.update({
-        where: { id: reserved.id },
-        data: { jobId: job.id ?? null },
-      });
+      await prisma.savedVariant
+        .update({ where: { id: sv.id }, data: { lastJobId: job.id ?? null } })
+        .catch(() => undefined);
 
-      out.push({
-        savedMediaId: reserved.id,
+      claims.push({
+        savedMediaId: savedMedia.id,
+        savedVariantId: sv.id,
         variantId: v.id,
         quality: v.quality,
-        jobId: job.id ?? reserved.id,
-        state: 'PENDING',
-        progress: 0,
+        state: 'IN_FLIGHT',
+        jobId: job.id ?? null,
       });
     } catch (err) {
       logger.error(
-        { err, userId: req.userId, mediaId: req.mediaId, variantId: v.id, quality: v.quality },
+        { err, userId: req.userId, mediaId: req.mediaId, variantId: v.id },
         'enqueueSave: failed for variant',
       );
       throw err instanceof AppError ? err : new AppError('INTERNAL', 'Failed to enqueue save', err);
     }
   }
 
-  return out;
+  // Aggregate state once after all claims resolved.
+  await recomputeSavedMediaState(savedMedia.id).catch(() => undefined);
+
+  return { savedMediaId: savedMedia.id, claims };
 }
 
-export async function getSaveJobStatus(savedMediaId: string, userId: string) {
+/**
+ * Per-savedMedia progress, suitable for the library detail card.
+ * Returns one entry per claimed variant with full pipeline state.
+ */
+export async function getSavedMediaProgress(savedMediaId: string, userId: string) {
   const sm = await prisma.savedMedia.findUnique({
     where: { id: savedMediaId },
-    include: { variant: true },
+    include: {
+      media: { select: { id: true, name: true } },
+      variants: {
+        include: {
+          variant: {
+            select: {
+              id: true,
+              quality: true,
+              state: true,
+              pipelineStep: true,
+              progress: true,
+              bytesDone: true,
+              bytesTotal: true,
+              speedBytesPerSec: true,
+              etaSec: true,
+              errorMessage: true,
+              sizeBytes: true,
+            },
+          },
+        },
+      },
+    },
   });
-  if (!sm || sm.userId !== userId) throw new AppError('NOT_FOUND', 'Save job not found');
+  if (!sm || sm.userId !== userId) {
+    throw new AppError('NOT_FOUND', 'Save not found');
+  }
+
   return {
     savedMediaId: sm.id,
-    variantId: sm.mediaVariantId,
-    quality: sm.variant.quality,
+    mediaId: sm.media.id,
     state: sm.state,
-    progress: sm.progress,
-    error: sm.error,
+    completedAt: sm.completedAt?.toISOString() ?? null,
+    variants: sm.variants.map((sv) => ({
+      savedVariantId: sv.id,
+      variantId: sv.variant.id,
+      quality: sv.variant.quality,
+      state: sv.variant.state,
+      pipelineStep: sv.variant.pipelineStep,
+      progress: sv.variant.progress,
+      bytesDone: sv.variant.bytesDone ? Number(sv.variant.bytesDone) : 0,
+      bytesTotal: sv.variant.bytesTotal !== null ? Number(sv.variant.bytesTotal) : null,
+      speedBytesPerSec: sv.variant.speedBytesPerSec,
+      etaSec: sv.variant.etaSec,
+      errorMessage: sv.variant.errorMessage,
+      sizeBytes: sv.variant.sizeBytes !== null ? Number(sv.variant.sizeBytes) : null,
+    })),
+  };
+}
+
+/**
+ * Re-queue a FAILED variant within an existing claim. Idempotent.
+ */
+export async function retrySavedVariant(
+  savedVariantId: string,
+  userId: string,
+): Promise<EnqueuedClaim> {
+  const sv = await prisma.savedVariant.findUnique({
+    where: { id: savedVariantId },
+    include: { saved: true, variant: true },
+  });
+  if (!sv || sv.saved.userId !== userId) {
+    throw new AppError('NOT_FOUND', 'Save claim not found');
+  }
+  if (sv.variant.state !== 'FAILED') {
+    return {
+      savedMediaId: sv.savedMediaId,
+      savedVariantId: sv.id,
+      variantId: sv.variant.id,
+      quality: sv.variant.quality,
+      state: sv.variant.state === 'PERSISTED' ? 'ALREADY_PERSISTED' : 'IN_FLIGHT',
+      jobId: null,
+    };
+  }
+  await prisma.mediaVariant.update({
+    where: { id: sv.variant.id },
+    data: {
+      state: 'PENDING',
+      pipelineStep: 'queued',
+      progress: 0,
+      bytesDone: 0n,
+      bytesTotal: null,
+      speedBytesPerSec: null,
+      etaSec: null,
+      errorMessage: null,
+    },
+  });
+  const job = await saveQueue.add(
+    'download-variant',
+    { savedMediaId: sv.savedMediaId, variantId: sv.variant.id } satisfies SaveJobData,
+    {
+      jobId: `save:${sv.id}:retry:${Date.now()}`,
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 5_000 },
+      removeOnComplete: { age: 3600, count: 1000 },
+      removeOnFail: { age: 86400, count: 1000 },
+    },
+  );
+  await prisma.savedVariant
+    .update({ where: { id: sv.id }, data: { lastJobId: job.id ?? null } })
+    .catch(() => undefined);
+  await recomputeSavedMediaState(sv.savedMediaId).catch(() => undefined);
+
+  return {
+    savedMediaId: sv.savedMediaId,
+    savedVariantId: sv.id,
+    variantId: sv.variant.id,
+    quality: sv.variant.quality,
+    state: 'IN_FLIGHT',
+    jobId: job.id ?? null,
   };
 }

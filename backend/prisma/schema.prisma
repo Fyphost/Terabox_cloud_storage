@@ -1,10 +1,20 @@
-// Fyphost — Database schema
+// Fyphost — Database schema (v3, persistence rebuild)
 //
 // Conventions:
-// - Identifiers are short prefixed strings (med_, var_, ...) generated app-side.
-// - Source URL deduplication via Media.sourceHash.
-// - MediaVariant.state is the canonical bytes-location state machine.
-// - SavedMedia is the per-user claim on a variant; bytes are shared.
+//
+// - Identifiers are short prefixed strings (med_, var_, sav_, ...).
+// - Source-URL deduplication via Media.sourceHash. One Media per source.
+// - The `Media` row is the root of permanent storage. All bytes for every
+//   quality of that media live under Media.storageKey.
+// - `MediaVariant` is one quality of one media. Its file paths are stored as
+//   relative keys under Media.storageKey so the whole tree can be moved or
+//   re-rooted without rewriting paths in the DB.
+// - `SavedMedia` is the per-user claim on a Media. `SavedVariant` rows
+//   record which qualities each user wants saved.
+// - `MediaVariant.state` + `pipelineStep` + progress columns are the canonical
+//   source of truth for "is this variant playable from local storage yet?".
+// - Saved-media playback routes derive everything from the DB + permanent
+//   storage; they NEVER touch upstream URLs. Only EPHEMERAL/CACHED flows do.
 
 generator client {
   provider        = "prisma-client-js"
@@ -36,35 +46,35 @@ enum EmailTokenKind {
 }
 
 model User {
-  id              String     @id
-  kind            UserKind   @default(ANON)
-  role            UserRole   @default(USER)
-  email           String?    @unique
-  emailVerifiedAt DateTime?
-  displayName     String?
-  passwordHash    String?
-  storageQuotaBytes BigInt   @default(5368709120) // 5 GiB default
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
-  lastSeenAt      DateTime?
+  id                String     @id
+  kind              UserKind   @default(ANON)
+  role              UserRole   @default(USER)
+  email             String?    @unique
+  emailVerifiedAt   DateTime?
+  displayName       String?
+  passwordHash      String?
+  storageQuotaBytes BigInt     @default(5368709120) // 5 GiB default
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  lastSeenAt        DateTime?
 
   saved         SavedMedia[]
-  sessions      StreamSession[]
   refreshTokens RefreshToken[]
   emailTokens   EmailToken[]
+  sessions      StreamSession[]
 
   @@index([lastSeenAt])
 }
 
 model EmailToken {
-  id         String         @id
-  userId     String
-  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  kind       EmailTokenKind
-  tokenHash  String         @unique
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime       @default(now())
+  id        String         @id
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      EmailTokenKind
+  tokenHash String         @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime       @default(now())
 
   @@index([userId, kind])
   @@index([expiresAt])
@@ -87,7 +97,7 @@ model RefreshToken {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Media + Variants
+// Media + variants (root of permanent storage)
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum MediaKind {
@@ -97,11 +107,20 @@ enum MediaKind {
   OTHER
 }
 
+/// State machine for a MediaVariant's bytes location.
+/// Transitions are owned by save.worker.ts — see documentation there.
 enum VariantState {
-  EPHEMERAL       // not on disk; proxy-only
-  CACHED          // on local NVMe cache
-  PERSISTED       // in permanent storage; never auto-evicted
-  PENDING_DELETE  // marked for storage-cleanup worker
+  EPHEMERAL          /// no bytes anywhere; only upstream URL known
+  CACHED             /// transient hot bytes on NVMe cache
+  PENDING            /// scheduled for permanent download
+  FETCHING           /// resolving upstream playlist / file URL
+  DOWNLOADING        /// actively writing bytes to staging
+  GENERATING_HLS     /// finalizing local playlist
+  GENERATING_THUMBNAIL
+  FINALIZING         /// staged → permanent atomic move + verification
+  PERSISTED          /// fully on permanent storage; never auto-evicted
+  FAILED             /// terminal failure; safe to retry by re-enqueuing
+  PENDING_DELETE     /// no SavedMedia references; queued for storage cleanup
 }
 
 enum VariantContainer {
@@ -112,48 +131,87 @@ enum VariantContainer {
 
 model Media {
   id                  String     @id
-  sourceHash          String     @unique          // sha256(normalized source URL)
-  sourceUrl           String                       // original URL, for refresh
+  sourceHash          String     @unique // sha256(normalized source URL)
+  sourceUrl           String
   name                String
   kind                MediaKind  @default(VIDEO)
-  sizeBytes           BigInt?                      // sum of canonical variant or upstream-reported
-  thumbnailUrl        String?
+
+  /// Top-level metadata shared across qualities.
+  sizeBytes           BigInt?    // total of all variant bytes when persisted
   durationSec         Int?
+  thumbnailUrl        String?    // fallback upstream thumbnail (used until we persist our own)
+
+  /// Permanent storage layout (under env.STORAGE_PERMANENT_DIR):
+  ///   {storageKey}/                  e.g. media/{mediaId}/
+  ///     metadata.json                metadataKey
+  ///     thumb.jpg                    thumbnailKey
+  ///     poster.jpg                   posterKey
+  ///     original/file.mp4            originalKey   (optional)
+  ///     hls/master.m3u8              masterPlaylistKey
+  ///     hls/{quality}/playlist.m3u8  per MediaVariant.hlsPlaylistKey
+  ///     hls/{quality}/seg-N.ts       per MediaVariant.hlsSegmentDir
+  storageKey          String?
+  metadataKey         String?
+  thumbnailKey        String?
+  posterKey           String?
+  originalKey         String?
+  masterPlaylistKey   String?
+
+  metadataRefreshedAt DateTime   @default(now())
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
-  metadataRefreshedAt DateTime   @default(now())
 
   variants            MediaVariant[]
+  savedBy             SavedMedia[]
 
   @@index([createdAt])
 }
 
 model MediaVariant {
-  id            String           @id
-  mediaId       String
-  media         Media            @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  id        String           @id
+  mediaId   String
+  media     Media            @relation(fields: [mediaId], references: [id], onDelete: Cascade)
 
-  quality       String                                // "360p" | "480p" | "720p" | "1080p" | "audio"
-  container     VariantContainer @default(HLS)
-  width         Int?
-  height        Int?
-  bitrateBps    Int?
-  sizeBytes     BigInt?
+  quality    String           // "240p" | "360p" | "480p" | "720p" | "1080p" | ...
+  container  VariantContainer @default(HLS)
+  width      Int?
+  height     Int?
+  bitrateBps Int?
+  sizeBytes  BigInt?
+  sha256     String?
 
-  upstreamPlaylistUrl String?                          // m3u8
-  upstreamFileUrl     String?                          // direct mp4/etc
+  /// Upstream URLs (refreshable, may expire). Used only while EPHEMERAL/CACHED.
+  upstreamPlaylistUrl String?
+  upstreamFileUrl     String?
   upstreamRefreshedAt DateTime @default(now())
 
-  state         VariantState     @default(EPHEMERAL)
-  storageKey    String?
-  sha256        String?
-  cachedBytes   BigInt           @default(0)
+  /// Local storage. Paths are RELATIVE to Media.storageKey so the tree is
+  /// movable. Either hlsPlaylistKey (HLS variant) or fileKey (MP4 variant)
+  /// is set when state == PERSISTED.
+  hlsPlaylistKey String?     // e.g. "hls/720p/playlist.m3u8"
+  hlsSegmentDir  String?     // e.g. "hls/720p"
+  fileKey        String?     // e.g. "files/720p.mp4"
+  segmentCount   Int?
 
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  /// State machine. Workers are the only writers of these columns.
+  state          VariantState @default(EPHEMERAL)
+  pipelineStep   String?      // free-text: "fetching playlist", "writing seg 12/40", ...
+  progress       Float        @default(0) // 0..1
+  bytesDone      BigInt       @default(0)
+  bytesTotal     BigInt?
+  speedBytesPerSec Int?
+  etaSec         Int?
+  errorMessage   String?
+  attemptCount   Int          @default(0)
 
-  saved         SavedMedia[]
-  cacheEntries  CacheEntry[]
+  /// Hot cache footprint, separate from PERSISTED (which lives on permanent disk).
+  cachedBytes    BigInt       @default(0)
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  savedVariants  SavedVariant[]
+  cacheEntries   CacheEntry[]
 
   @@unique([mediaId, quality])
   @@index([state])
@@ -161,37 +219,53 @@ model MediaVariant {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Saved (user library)
+// User library (saved claims)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Aggregated state for a SavedMedia. The save.service derives this from
+/// the underlying SavedVariant rows + their MediaVariant.state.
 enum SavedState {
-  PENDING
-  DOWNLOADING
-  COMPLETE
-  FAILED
+  PENDING       // no variants yet finished
+  IN_PROGRESS   // at least one variant still working
+  COMPLETE      // all claimed variants PERSISTED
+  PARTIAL       // some variants PERSISTED, at least one FAILED, none in flight
+  FAILED        // all claimed variants FAILED
 }
 
 model SavedMedia {
-  id              String        @id
-  userId          String
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  mediaVariantId  String
-  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+  id          String     @id
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaId     String
+  media       Media      @relation(fields: [mediaId], references: [id], onDelete: Cascade)
 
-  state           SavedState    @default(PENDING)
-  progress        Float         @default(0) // 0..1
-  jobId           String?
-  error           String?
-  createdAt       DateTime      @default(now())
-  completedAt     DateTime?
+  state       SavedState @default(PENDING)
+  createdAt   DateTime   @default(now())
+  completedAt DateTime?
 
-  @@unique([userId, mediaVariantId])
+  variants    SavedVariant[]
+
+  @@unique([userId, mediaId])
   @@index([userId, createdAt])
   @@index([state])
 }
 
+model SavedVariant {
+  id            String       @id
+  savedMediaId  String
+  saved         SavedMedia   @relation(fields: [savedMediaId], references: [id], onDelete: Cascade)
+  mediaVariantId String
+  variant       MediaVariant @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+  createdAt     DateTime     @default(now())
+  /// jobId of the most recent BullMQ save attempt (optional, audit only).
+  lastJobId     String?
+
+  @@unique([savedMediaId, mediaVariantId])
+  @@index([mediaVariantId])
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Cache entries (NVMe hot cache)
+// Cache entries (NVMe hot cache; separate from permanent storage)
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum CacheKind {
@@ -201,18 +275,18 @@ enum CacheKind {
 }
 
 model CacheEntry {
-  id              String        @id
+  id              String       @id
   mediaVariantId  String
-  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+  variant         MediaVariant @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
 
   kind            CacheKind
-  segmentKey      String                       // "playlist" | "seg-<n>" | "file"
-  storageKey      String                       // path under storage/cache/...
+  segmentKey      String       // "playlist" | "seg-<n>" | "file"
+  storageKey      String
   bytes           BigInt
   contentType     String?
 
-  createdAt       DateTime      @default(now())
-  lastAccessedAt  DateTime      @default(now())
+  createdAt       DateTime     @default(now())
+  lastAccessedAt  DateTime     @default(now())
 
   @@unique([mediaVariantId, segmentKey])
   @@index([lastAccessedAt])
@@ -223,13 +297,13 @@ model CacheEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model StreamSession {
-  id             String        @id
+  id             String    @id
   userId         String?
-  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   mediaVariantId String
   ip             String?
   userAgent      String?
-  issuedAt       DateTime      @default(now())
+  issuedAt       DateTime  @default(now())
   expiresAt      DateTime
   revokedAt      DateTime?
 
@@ -250,7 +324,7 @@ enum QueueJobStatus {
 }
 
 model QueueJob {
-  id          String         @id   // BullMQ job id
+  id          String         @id
   queue       String
   type        String
   payloadJson String

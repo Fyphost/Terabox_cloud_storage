@@ -7,11 +7,11 @@ import type { MouseEvent } from 'react';
 import { formatBytes } from '@/lib/utils/format';
 import { useDeleteFromLibrary } from '@/hooks/use-library';
 import { toast } from '@/lib/store/ui.store';
-import type { ApiLibraryEntry } from '@/types/api';
+import type { ApiLibraryItem } from '@/types/api';
 import { cn } from '@/lib/utils/cn';
 
 interface Props {
-  entry: ApiLibraryEntry;
+  entry: ApiLibraryItem;
   selected: boolean;
   selectionMode: boolean;
   onToggle: () => void;
@@ -20,8 +20,18 @@ interface Props {
 export default function LibraryCard({ entry, selected, selectionMode, onToggle }: Props) {
   const del = useDeleteFromLibrary();
   const m = entry.media;
-  const isReady = entry.state === 'COMPLETE';
-  const isPending = entry.state === 'PENDING' || entry.state === 'DOWNLOADING';
+  const ready = entry.state === 'COMPLETE' || entry.state === 'PARTIAL';
+  const inflight = entry.state === 'PENDING' || entry.state === 'IN_PROGRESS';
+  const failed = entry.state === 'FAILED';
+
+  // Aggregate progress across in-flight variants.
+  const inflightVariants = entry.variants.filter(
+    (v) => v.state !== 'PERSISTED' && v.state !== 'FAILED',
+  );
+  const aggregatePct =
+    inflightVariants.length > 0
+      ? inflightVariants.reduce((acc, v) => acc + v.progress, 0) / inflightVariants.length
+      : 0;
 
   const onDelete = async (e: MouseEvent) => {
     e.preventDefault();
@@ -42,6 +52,9 @@ export default function LibraryCard({ entry, selected, selectionMode, onToggle }
     }
   };
 
+  // Saved-only watch route (never falls back to upstream).
+  const href = ready ? `/watch/${entry.savedMediaId}` : `/watch/${entry.savedMediaId}`;
+
   return (
     <article
       className={cn(
@@ -49,7 +62,7 @@ export default function LibraryCard({ entry, selected, selectionMode, onToggle }
         selected ? 'border-primary ring-2 ring-ring/30' : 'border-border hover:shadow-card',
       )}
     >
-      <Link href={`/m/${m.id}`} onClick={onClickWrap} className="block">
+      <Link href={href} onClick={onClickWrap} className="block">
         <div className="relative aspect-video w-full overflow-hidden bg-muted">
           {m.thumbnailUrl ? (
             <Image
@@ -58,24 +71,36 @@ export default function LibraryCard({ entry, selected, selectionMode, onToggle }
               fill
               sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
               className="object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+              unoptimized
             />
           ) : null}
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/40 via-black/0 to-black/0 opacity-0 transition-opacity group-hover:opacity-100" />
-          <span className="absolute right-2 top-2 inline-flex items-center rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
-            {entry.quality}
-          </span>
-          {isReady && (
+
+          {entry.topQuality && (
+            <span className="absolute right-2 top-2 inline-flex items-center rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+              {entry.topQuality}
+            </span>
+          )}
+
+          {ready && (
             <span className="pointer-events-none absolute left-1/2 top-1/2 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-primary opacity-0 shadow-elevated transition-opacity group-hover:opacity-100">
               <Play className="ml-0.5 h-5 w-5 fill-current" aria-hidden />
             </span>
           )}
-          {isPending && (
+
+          {inflight && (
             <div className="absolute inset-x-0 bottom-0 h-1 bg-white/30">
               <div
-                className="h-full bg-primary transition-[width]"
-                style={{ width: `${Math.round(entry.progress * 100)}%` }}
+                className="h-full bg-primary transition-[width] duration-500"
+                style={{ width: `${Math.round(aggregatePct * 100)}%` }}
               />
             </div>
+          )}
+
+          {failed && (
+            <span className="absolute left-2 bottom-2 inline-flex items-center rounded-full bg-danger/95 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+              Failed
+            </span>
           )}
         </div>
         <div className="p-3">
@@ -83,21 +108,22 @@ export default function LibraryCard({ entry, selected, selectionMode, onToggle }
           <p className="mt-1 text-xs text-muted-fg">
             {formatBytes(m.sizeBytes)}
             {' · '}
-            {isReady ? (
+            {entry.state === 'COMPLETE' ? (
               'Ready'
+            ) : entry.state === 'PARTIAL' ? (
+              <span className="text-warning">Partial</span>
             ) : entry.state === 'FAILED' ? (
               <span className="text-danger">Failed</span>
             ) : (
               <span className="inline-flex items-center gap-1">
                 <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-                {entry.state.toLowerCase()}
+                {Math.round(aggregatePct * 100)}%
               </span>
             )}
           </p>
         </div>
       </Link>
 
-      {/* Selection checkbox */}
       <button
         type="button"
         onClick={(e) => {
@@ -117,7 +143,6 @@ export default function LibraryCard({ entry, selected, selectionMode, onToggle }
         {selected ? '✓' : ''}
       </button>
 
-      {/* Delete (hover) */}
       <button
         type="button"
         onClick={onDelete}

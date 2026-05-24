@@ -24,13 +24,14 @@ const QUALITY_RESOLUTION: Record<string, { w: number; h: number }> = {
   '2160p': { w: 3840, h: 2160 },
 };
 
+const STALE_AFTER_MS = 30 * 60 * 1000;
+
 export interface IngestResult {
   media: Media;
   variants: MediaVariant[];
 }
 
 function normalizeUrl(input: string): string {
-  // Conservative normalize: strip fragment, trailing slash, lowercase host.
   try {
     const u = new URL(input.trim());
     u.hash = '';
@@ -46,20 +47,28 @@ function hashSourceUrl(url: string): string {
   return createHash('sha256').update(url).digest('hex');
 }
 
-export async function ingestUrl(rawUrl: string): Promise<IngestResult> {
+export interface IngestOptions {
+  /**
+   * When true, ALWAYS re-extract upstream metadata even if we have a fresh
+   * Media row. Used by the homepage analyze button so users never see stale
+   * extractor output. Existing variants' bytes-location state is preserved.
+   */
+  forceRefresh?: boolean;
+}
+
+export async function ingestUrl(rawUrl: string, opts: IngestOptions = {}): Promise<IngestResult> {
   const url = normalizeUrl(rawUrl);
   const sourceHash = hashSourceUrl(url);
 
-  // Dedup: return cached Media if present and recent.
   const existing = await prisma.media.findUnique({
     where: { sourceHash },
     include: { variants: true },
   });
 
-  // Refresh policy: re-extract if older than 30 minutes (upstream URLs expire).
   const isStale =
+    opts.forceRefresh ||
     !existing ||
-    Date.now() - existing.metadataRefreshedAt.getTime() > 30 * 60 * 1000 ||
+    Date.now() - existing.metadataRefreshedAt.getTime() > STALE_AFTER_MS ||
     existing.variants.length === 0;
 
   if (existing && !isStale) {
@@ -86,14 +95,15 @@ export async function ingestUrl(rawUrl: string): Promise<IngestResult> {
         metadataRefreshedAt: new Date(),
       },
       update: {
-        name: meta.name,
-        sizeBytes: sizeBytes ? BigInt(sizeBytes) : null,
-        thumbnailUrl: meta.thumbnail ?? null,
+        // We never overwrite name / size with extractor output if it'd erase
+        // a non-null DB value; the extractor sometimes returns shorter strings.
+        name: meta.name || existing?.name || 'media',
+        sizeBytes: sizeBytes ? BigInt(sizeBytes) : existing?.sizeBytes ?? null,
+        thumbnailUrl: meta.thumbnail ?? existing?.thumbnailUrl ?? null,
         metadataRefreshedAt: new Date(),
       },
     });
 
-    // Upsert variants by (mediaId, quality), preserving state for already-saved.
     const variantRows: MediaVariant[] = [];
     for (const [quality, playlistUrl] of Object.entries(streams)) {
       const existingVar = await tx.mediaVariant.findUnique({
@@ -102,6 +112,9 @@ export async function ingestUrl(rawUrl: string): Promise<IngestResult> {
       const res = QUALITY_RESOLUTION[quality];
       const bw = QUALITY_BANDWIDTH[quality] ?? null;
       if (existingVar) {
+        // CRITICAL: preserve bytes-location state. We only refresh upstream
+        // URLs and dimensions; we never roll a PERSISTED variant back to
+        // EPHEMERAL just because the extractor was hit again.
         const updated = await tx.mediaVariant.update({
           where: { id: existingVar.id },
           data: {

@@ -1,12 +1,21 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rename, stat, unlink, readdir } from 'node:fs/promises';
+import {
+  mkdir,
+  rename,
+  rm,
+  stat,
+  unlink,
+  readdir,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { AppError } from '../../lib/errors.js';
 import type {
   ByteRange,
+  ListedObject,
   ReadResult,
   StorageBackend,
   StorageStat,
@@ -21,6 +30,11 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   '.aac': 'audio/aac',
   '.mp3': 'audio/mpeg',
   '.bin': 'application/octet-stream',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.json': 'application/json; charset=utf-8',
 };
 
 function inferContentType(key: string): string {
@@ -37,17 +51,17 @@ export class LocalDiskBackend implements StorageBackend {
   }
 
   /** Resolve and guard against traversal. */
-  private resolveKey(key: string): string {
+  resolve(key: string): string {
     const normalized = key.replace(/^\/+/, '').replace(/\\/g, '/');
     const full = resolve(this.root, normalized);
-    if (!full.startsWith(this.root + sep) && full !== this.root) {
+    if (full !== this.root && !full.startsWith(this.root + sep)) {
       throw new AppError('STORAGE_ERROR', 'Invalid storage key');
     }
     return full;
   }
 
   async read(key: string, range?: ByteRange): Promise<ReadResult> {
-    const path = this.resolveKey(key);
+    const path = this.resolve(key);
     const s = await stat(path).catch(() => null);
     if (!s || !s.isFile()) throw new AppError('NOT_FOUND', 'Not in storage');
 
@@ -71,14 +85,13 @@ export class LocalDiskBackend implements StorageBackend {
   }
 
   async write(key: string, src: Readable, _opts?: { contentType?: string }): Promise<WriteResult> {
-    const path = this.resolveKey(key);
+    const path = this.resolve(key);
     await mkdir(dirname(path), { recursive: true });
 
     const tmp = `${path}.partial-${process.pid}-${Date.now()}`;
     const hash = createHash('sha256');
     let bytes = 0;
 
-    // Honors backpressure: hash + count via a Transform inserted between src and disk.
     const meter = new Transform({
       transform(chunk: Buffer, _enc, cb: TransformCallback) {
         bytes += chunk.length;
@@ -98,33 +111,71 @@ export class LocalDiskBackend implements StorageBackend {
     return { bytes, sha256: hash.digest('hex') };
   }
 
+  async writeBuffer(key: string, buf: Buffer, _opts?: { contentType?: string }): Promise<WriteResult> {
+    const path = this.resolve(key);
+    await mkdir(dirname(path), { recursive: true });
+    const tmp = `${path}.partial-${process.pid}-${Date.now()}`;
+    try {
+      await writeFile(tmp, buf);
+      await rename(tmp, path);
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw new AppError('STORAGE_ERROR', 'Failed to write to storage', err);
+    }
+    return {
+      bytes: buf.length,
+      sha256: createHash('sha256').update(buf).digest('hex'),
+    };
+  }
+
   async exists(key: string): Promise<boolean> {
-    const path = this.resolveKey(key);
+    const path = this.resolve(key);
     return !!(await stat(path).catch(() => null));
   }
 
   async stat(key: string): Promise<StorageStat | null> {
-    const path = this.resolveKey(key);
+    const path = this.resolve(key);
     const s = await stat(path).catch(() => null);
     if (!s || !s.isFile()) return null;
     return { size: s.size, mtimeMs: s.mtimeMs };
   }
 
   async delete(key: string): Promise<void> {
-    const path = this.resolveKey(key);
+    const path = this.resolve(key);
     await unlink(path).catch(() => undefined);
   }
 
-  async *list(prefix: string): AsyncIterable<{ key: string; size: number; mtimeMs: number }> {
-    const root = this.resolveKey(prefix);
+  async deletePrefix(prefix: string): Promise<void> {
+    const path = this.resolve(prefix);
+    await rm(path, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  async *list(prefix: string): AsyncIterable<ListedObject> {
+    const root = this.resolve(prefix);
     yield* walk(root, root);
+  }
+
+  async renameDir(from: string, to: string): Promise<void> {
+    const src = this.resolve(from);
+    const dst = this.resolve(to);
+    if (src === dst) return;
+    // Ensure parent exists; refuse to overwrite an existing destination.
+    if (await stat(dst).catch(() => null)) {
+      throw new AppError('STORAGE_ERROR', `renameDir destination exists: ${to}`);
+    }
+    await mkdir(dirname(dst), { recursive: true });
+    try {
+      await rename(src, dst);
+    } catch (err) {
+      throw new AppError('STORAGE_ERROR', 'renameDir failed', err);
+    }
   }
 }
 
 async function* walk(
   root: string,
   current: string,
-): AsyncIterable<{ key: string; size: number; mtimeMs: number }> {
+): AsyncIterable<ListedObject> {
   let entries;
   try {
     entries = await readdir(current, { withFileTypes: true });
@@ -138,7 +189,11 @@ async function* walk(
     } else if (e.isFile()) {
       const s = await stat(full).catch(() => null);
       if (!s) continue;
-      yield { key: full.slice(root.length + 1).replace(/\\/g, '/'), size: s.size, mtimeMs: s.mtimeMs };
+      yield {
+        key: full.slice(root.length + 1).replace(/\\/g, '/'),
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+      };
     }
   }
 }

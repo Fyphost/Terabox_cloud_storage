@@ -1,27 +1,35 @@
 import { apiFetch } from './client.js';
-import type { ApiSaveJob } from '@/types/api';
+import type {
+  ApiEnqueuedClaim,
+  ApiEnqueueSaveResult,
+  ApiSavedMediaProgress,
+} from '@/types/api';
 
 export function saveQualities(
   mediaId: string,
   qualities: string[],
   signal?: AbortSignal,
-): Promise<{ jobs: ApiSaveJob[] }> {
-  return apiFetch<{ jobs: ApiSaveJob[] }>('/save', {
+): Promise<ApiEnqueueSaveResult> {
+  return apiFetch<ApiEnqueueSaveResult>('/save', {
     method: 'POST',
     body: { mediaId, qualities },
     signal,
   });
 }
 
-export interface SaveStatus {
-  savedMediaId: string;
-  variantId: string;
-  quality: string;
-  state: 'PENDING' | 'DOWNLOADING' | 'COMPLETE' | 'FAILED';
-  progress: number;
-  error: string | null;
+export function getSavedMediaProgress(
+  savedMediaId: string,
+  signal?: AbortSignal,
+): Promise<ApiSavedMediaProgress> {
+  return apiFetch<ApiSavedMediaProgress>(
+    `/save/${encodeURIComponent(savedMediaId)}`,
+    { signal },
+  );
 }
 
-export function getSaveStatus(savedMediaId: string, signal?: AbortSignal): Promise<SaveStatus> {
-  return apiFetch<SaveStatus>(`/save/${encodeURIComponent(savedMediaId)}`, { signal });
+export function retrySavedVariant(savedVariantId: string): Promise<ApiEnqueuedClaim> {
+  return apiFetch<ApiEnqueuedClaim>(
+    `/save/variant/${encodeURIComponent(savedVariantId)}/retry`,
+    { method: 'POST' },
+  );
 }
