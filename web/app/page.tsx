@@ -1,8 +1,22 @@
-import { ArrowRight, Bookmark, PlayCircle, ShieldCheck } from 'lucide-react';
+import {
+  ArrowRight,
+  Download,
+  HardDrive,
+  Layers,
+  Lock,
+  PlayCircle,
+} from 'lucide-react';
 import Link from 'next/link';
+import { Suspense } from 'react';
 import UrlAnalyzer from '@/components/ingest/UrlAnalyzer';
 
-export default function LandingPage() {
+export default function LandingPage({
+  searchParams,
+}: {
+  searchParams?: { focus?: string };
+}) {
+  const autoFocus = searchParams?.focus === '1';
+
   return (
     <div>
       {/* Hero */}
@@ -14,51 +28,65 @@ export default function LandingPage() {
         <div className="container relative max-w-4xl py-14 md:py-24">
           <div className="text-center">
             <span className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-fg-soft shadow-sm">
-              <span className="h-1.5 w-1.5 rounded-full bg-success" /> No ads · No fake buttons · No throttle
+              Cloud media · Saved permanently · Yours forever
             </span>
             <h1 className="mt-6 text-balance text-3xl font-semibold tracking-tight text-fg md:text-5xl">
-              Stream TeraBox media. Cleanly.
+              Save TeraBox media to your own cloud library.
             </h1>
             <p className="mx-auto mt-4 max-w-2xl text-balance text-sm text-muted-fg md:text-base">
-              Paste a link. Pick your quality. Watch instantly. Save what you want for later — saved
-              media streams from Fyphost storage and never depends on the original link.
+              Fyphost downloads your selected qualities into permanent storage, generates
+              an HLS stream you control, and serves direct MP4 downloads with the original
+              filename. Saved media keeps working even if the source link disappears.
             </p>
           </div>
 
           <div className="mx-auto mt-8 max-w-3xl">
-            <UrlAnalyzer />
+            <Suspense fallback={null}>
+              <UrlAnalyzer autoFocus={autoFocus} />
+            </Suspense>
             <p className="mt-2 text-center text-xs text-muted-fg">
-              Try a 1024terabox.com URL. Streaming starts in seconds.
+              Each analyze pulls fresh upstream metadata — no stale results.
             </p>
           </div>
         </div>
       </section>
 
-      {/* Features */}
+      {/* Capabilities */}
       <section className="container max-w-5xl py-14 md:py-20">
         <h2 className="text-balance text-center text-2xl font-semibold tracking-tight md:text-3xl">
-          Built for streaming, not for ads
+          What Fyphost actually does
         </h2>
-        <p className="mx-auto mt-3 max-w-xl text-center text-sm text-muted-fg md:text-base">
-          Fyphost replaces the painful download-host UX with a clean, mobile-first player and a
-          library that lasts.
-        </p>
 
         <div className="mt-10 grid gap-4 md:grid-cols-3">
           <Feature
+            icon={<HardDrive className="h-5 w-5" />}
+            title="Permanent storage"
+            body="Each saved video lives under its own media root with metadata, thumbnail, and HLS segments — independent of the upstream extractor."
+          />
+          <Feature
+            icon={<Layers className="h-5 w-5" />}
+            title="Multi-quality variants"
+            body="Save 720p today, add 1080p next week. One library entry, multiple downloadable qualities, shared metadata."
+          />
+          <Feature
             icon={<PlayCircle className="h-5 w-5" />}
-            title="Instant playback"
-            body="HLS straight to your player. No redirects, no fake download buttons."
+            title="Hosted HLS playback"
+            body="Adaptive bitrate streaming served from your storage. Quality switching, scrubbing, and mobile-friendly controls."
           />
           <Feature
-            icon={<Bookmark className="h-5 w-5" />}
-            title="Save your way"
-            body="Pick the qualities to keep. We persist only what you save."
+            icon={<Download className="h-5 w-5" />}
+            title="Direct MP4 downloads"
+            body="Real Content-Disposition with the original filename. Range-friendly. No download buttons that aren't downloads."
           />
           <Feature
-            icon={<ShieldCheck className="h-5 w-5" />}
-            title="Library that lasts"
-            body="Saved media streams from Fyphost storage — independent of upstream links."
+            icon={<Lock className="h-5 w-5" />}
+            title="Signed access"
+            body="Saved media is served via short-lived signed URLs bound to your account. Library playback never falls back to upstream."
+          />
+          <Feature
+            icon={<ArrowRight className="h-5 w-5" />}
+            title="Survives upstream churn"
+            body="Once a save completes, the upstream link can rot, expire, or get pulled. Your stream and download keep working."
           />
         </div>
 

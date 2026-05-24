@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,11 +9,21 @@ import { useIngest } from '@/hooks/use-ingest';
 import { ApiError } from '@/lib/api/client';
 import { toast } from '@/lib/store/ui.store';
 
-export default function UrlAnalyzer() {
+interface Props {
+  /** Auto-focus the input on mount (used when arriving from `?focus=1`). */
+  autoFocus?: boolean;
+}
+
+export default function UrlAnalyzer({ autoFocus = false }: Props) {
   const router = useRouter();
   const ingest = useIngest();
   const [url, setUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (autoFocus) inputRef.current?.focus();
+  }, [autoFocus]);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +34,9 @@ export default function UrlAnalyzer() {
       return;
     }
     try {
-      const media = await ingest.mutateAsync(cleaned);
+      // ALWAYS ask for fresh upstream metadata. Stale cached extractor
+      // results are how dead links sneak through.
+      const media = await ingest.mutateAsync({ url: cleaned, forceRefresh: true });
       if (!media?.id) {
         setError('Could not analyze that link.');
         return;
@@ -44,6 +56,7 @@ export default function UrlAnalyzer() {
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
         <Input
+          ref={inputRef}
           inputMode="url"
           autoCapitalize="none"
           autoCorrect="off"

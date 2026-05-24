@@ -1,5 +1,5 @@
 import { apiFetch } from './client.js';
-import type { ApiLibraryPage } from '@/types/api';
+import type { ApiLibraryPage, ApiSavedMediaDetail } from '@/types/api';
 
 export type LibrarySort = 'recent' | 'oldest' | 'name' | 'size';
 
@@ -14,6 +14,13 @@ export function listLibrary(
   if (params.sort) usp.set('sort', params.sort);
   const qs = usp.toString();
   return apiFetch<ApiLibraryPage>(`/library${qs ? `?${qs}` : ''}`, { signal });
+}
+
+export function getSavedMedia(savedMediaId: string, signal?: AbortSignal): Promise<ApiSavedMediaDetail> {
+  return apiFetch<ApiSavedMediaDetail>(
+    `/library/${encodeURIComponent(savedMediaId)}`,
+    { signal },
+  );
 }
 
 export function deleteLibraryEntry(savedMediaId: string, signal?: AbortSignal): Promise<void> {

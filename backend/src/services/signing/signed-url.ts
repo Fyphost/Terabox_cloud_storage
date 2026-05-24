@@ -3,21 +3,18 @@ import { env } from '../../config/env.js';
 import { AppError } from '../../lib/errors.js';
 
 /**
- * Signed URL parameters:
- *   t   = base64url(HMAC_SHA256(secret, `${kv}|${variantId}|${resource}|${exp}|${u}`))
- *   exp = unix seconds
- *   u   = userId or "anon"
- *   kv  = key version (allows secret rotation)
+ * Two URL families, both HMAC-signed:
  *
- * HMAC verification only — no DB lookup on the hot path.
+ *   variant scope ("V") — for live/cached upstream-backed streaming:
+ *      payload = `${kv}|V|${variantId}|${resource}|${exp}|${u}`
+ *      route   = /api/v1/stream/{variantId}/{resource}
+ *
+ *   library scope ("L") — for saved-media local-only playback/download:
+ *      payload = `${kv}|L|${savedMediaId}|${resource}|${exp}|${u}`
+ *      route   = /api/v1/library/{savedMediaId}/{resource}
+ *
+ * Verification is constant-time, no DB lookup.
  */
-
-export interface SignParams {
-  variantId: string;
-  resource: string;       // e.g. "playlist.m3u8" | "segment/12" | "file" | "download"
-  userId?: string | null;
-  ttlSec?: number;
-}
 
 export interface SignedQuery {
   t: string;
@@ -26,24 +23,24 @@ export interface SignedQuery {
   kv: string;
 }
 
+type Scope = 'V' | 'L';
+
+function payload(scope: Scope, kv: string, id: string, resource: string, exp: number, u: string): string {
+  return `${kv}|${scope}|${id}|${resource}|${exp}|${u}`;
+}
+
 function b64url(buf: Buffer): string {
   return buf.toString('base64url');
 }
 
-function payload(kv: string, variantId: string, resource: string, exp: number, u: string): string {
-  return `${kv}|${variantId}|${resource}|${exp}|${u}`;
-}
-
-export function sign(params: SignParams): SignedQuery {
-  const ttl = params.ttlSec ?? env.SIGNED_URL_TTL_SEC;
+function makeSig(scope: Scope, id: string, resource: string, userId: string | null, ttlSec?: number): SignedQuery {
+  const ttl = ttlSec ?? env.SIGNED_URL_TTL_SEC;
   const exp = Math.floor(Date.now() / 1000) + ttl;
-  const u = params.userId ?? 'anon';
+  const u = userId ?? 'anon';
   const kv = env.SIGNING_KEY_VERSION;
-
   const mac = createHmac('sha256', env.SIGNING_SECRET)
-    .update(payload(kv, params.variantId, params.resource, exp, u))
+    .update(payload(scope, kv, id, resource, exp, u))
     .digest();
-
   return { t: b64url(mac), exp: String(exp), u, kv };
 }
 
@@ -52,11 +49,19 @@ export function buildSignedPath(basePath: string, q: SignedQuery): string {
   return `${basePath}?${usp.toString()}`;
 }
 
-/**
- * Build a relative signed stream URL. Always emit relative paths so the
- * browser uses the same origin it loaded the page from — this avoids CORS
- * and lets a Next rewrite proxy forward to the API in dev.
- */
+// ─── Variant scope (live/cached) ─────────────────────────────────────────────
+
+export interface SignParams {
+  variantId: string;
+  resource: string;
+  userId?: string | null;
+  ttlSec?: number;
+}
+
+export function sign(params: SignParams): SignedQuery {
+  return makeSig('V', params.variantId, params.resource, params.userId ?? null, params.ttlSec);
+}
+
 export function buildRelativeStreamUrl(
   variantId: string,
   resource: string,
@@ -74,7 +79,42 @@ export interface VerifyParams {
 }
 
 export function verify(params: VerifyParams): { userId: string | null } {
-  const { t, exp, u, kv } = params.query;
+  return verifyAny('V', params.variantId, params.resource, params.query);
+}
+
+// ─── Library scope (saved-only) ──────────────────────────────────────────────
+
+export function signLibrary(savedMediaId: string, resource: string, userId: string | null, ttlSec?: number): SignedQuery {
+  return makeSig('L', savedMediaId, resource, userId, ttlSec);
+}
+
+export function buildLibrarySignedUrl(
+  savedMediaId: string,
+  resource: string,
+  userId: string | null = null,
+  ttlSec?: number,
+): string {
+  const q = signLibrary(savedMediaId, resource, userId, ttlSec);
+  return buildSignedPath(`/api/v1/library/${savedMediaId}/${resource}`, q);
+}
+
+export function verifyLibrary(
+  savedMediaId: string,
+  resource: string,
+  query: { t?: string; exp?: string; u?: string; kv?: string },
+): { userId: string | null } {
+  return verifyAny('L', savedMediaId, resource, query);
+}
+
+// ─── Shared verification ─────────────────────────────────────────────────────
+
+function verifyAny(
+  scope: Scope,
+  id: string,
+  resource: string,
+  query: { t?: string; exp?: string; u?: string; kv?: string },
+): { userId: string | null } {
+  const { t, exp, u, kv } = query;
   if (!t || !exp || !u || !kv) {
     throw new AppError('FORBIDDEN', 'Missing signature');
   }
@@ -87,7 +127,7 @@ export function verify(params: VerifyParams): { userId: string | null } {
   }
 
   const expected = createHmac('sha256', env.SIGNING_SECRET)
-    .update(payload(kv, params.variantId, params.resource, expN, u))
+    .update(payload(scope, kv, id, resource, expN, u))
     .digest();
 
   let provided: Buffer;

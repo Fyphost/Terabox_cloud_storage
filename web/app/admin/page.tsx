@@ -5,42 +5,42 @@ import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 import { AlertTriangle, Database, Film, HardDrive, ListChecks, Users } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useCurrentUser, isRegistered } from '@/hooks/use-auth';
+import { useAuthGate } from '@/hooks/use-auth';
 import { getAdminStats, listAdminUsers, listFailedAdminJobs } from '@/lib/api/admin';
 import { formatBytes } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
 
 export default function AdminPage() {
   const router = useRouter();
-  const { data: me, isLoading } = useCurrentUser();
+  const auth = useAuthGate('/admin');
 
+  // Admin extra check: if user is registered but not admin, push them to /.
   useEffect(() => {
-    if (isLoading) return;
-    if (!isRegistered(me?.user) || me!.user!.role !== 'ADMIN') {
+    if (auth.ready && auth.isRegistered && auth.user!.role !== 'ADMIN') {
       router.replace('/');
     }
-  }, [me, isLoading, router]);
+  }, [auth.ready, auth.isRegistered, auth.user, router]);
+
+  const isAdmin = auth.ready && auth.isRegistered && auth.user!.role === 'ADMIN';
 
   const stats = useQuery({
     queryKey: ['admin', 'stats'],
     queryFn: ({ signal }) => getAdminStats(signal),
     refetchInterval: 30_000,
-    enabled: isRegistered(me?.user) && me!.user!.role === 'ADMIN',
+    enabled: isAdmin,
   });
-
   const users = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: ({ signal }) => listAdminUsers({ take: 25 }, signal),
-    enabled: isRegistered(me?.user) && me!.user!.role === 'ADMIN',
+    enabled: isAdmin,
   });
-
   const failed = useQuery({
     queryKey: ['admin', 'jobs-failed'],
     queryFn: ({ signal }) => listFailedAdminJobs({ take: 25 }, signal),
-    enabled: isRegistered(me?.user) && me!.user!.role === 'ADMIN',
+    enabled: isAdmin,
   });
 
-  if (!isRegistered(me?.user) || me!.user!.role !== 'ADMIN') {
+  if (!isAdmin) {
     return (
       <div className="container py-10">
         <Skeleton className="h-8 w-40" />
@@ -55,7 +55,6 @@ export default function AdminPage() {
         <p className="mt-1 text-sm text-muted-fg">Operational overview.</p>
       </header>
 
-      {/* KPI cards */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <KPI
           icon={<Users className="h-4 w-4" />}
@@ -95,7 +94,6 @@ export default function AdminPage() {
         />
       </div>
 
-      {/* Queues */}
       <section className="mt-8">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-fg">Queues</h2>
         <div className="grid gap-3 md:grid-cols-3">
@@ -105,7 +103,6 @@ export default function AdminPage() {
         </div>
       </section>
 
-      {/* Users */}
       <section className="mt-8">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-fg">
           Recent users
@@ -170,7 +167,6 @@ export default function AdminPage() {
         </div>
       </section>
 
-      {/* Failed jobs */}
       <section className="mt-8 mb-12">
         <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-fg">
           <AlertTriangle className="h-4 w-4 text-warning" />

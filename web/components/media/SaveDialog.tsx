@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { Loader2, Lock } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -23,6 +24,7 @@ export default function SaveDialog({ media, trigger }: Props) {
   const save = useSaveQualities();
 
   const [open, setOpen] = useState(false);
+  const [savedMediaId, setSavedMediaId] = useState<string | null>(null);
 
   const initial = useMemo(() => {
     const v =
@@ -52,17 +54,17 @@ export default function SaveDialog({ media, trigger }: Props) {
     if (selected.size === 0) return;
     try {
       const result = await save.mutateAsync({ mediaId: media.id, qualities: Array.from(selected) });
-      const total = result.jobs.length;
-      const completed = result.jobs.filter((j) => j.state === 'COMPLETE').length;
+      setSavedMediaId(result.savedMediaId);
+      const inflight = result.claims.filter((c) => c.state === 'IN_FLIGHT').length;
+      const persisted = result.claims.filter((c) => c.state === 'ALREADY_PERSISTED').length;
       toast({
         variant: 'success',
-        title: 'Save started',
+        title: inflight > 0 ? 'Save started' : 'Already in your library',
         description:
-          completed === total
-            ? 'All selected qualities are already in your library.'
-            : `Queued ${total - completed} variant${total - completed === 1 ? '' : 's'}. Check your library for progress.`,
+          inflight > 0
+            ? `Queued ${inflight} variant${inflight === 1 ? '' : 's'}. Check the watch page for live progress.`
+            : `${persisted} variant${persisted === 1 ? '' : 's'} already persisted — open the watch page.`,
       });
-      setOpen(false);
     } catch (err) {
       toast({
         variant: 'error',
@@ -78,69 +80,94 @@ export default function SaveDialog({ media, trigger }: Props) {
         {trigger}
       </span>
       <DialogContent
-        title="Save to library"
-        description="Pick the qualities to keep in Fyphost storage. Saved media streams without ads."
+        title={savedMediaId ? 'Saved to library' : 'Save to library'}
+        description={
+          savedMediaId
+            ? 'Your library entry is ready. Open the watch page to track progress and play.'
+            : 'Pick the qualities to keep in Fyphost storage. Saved media plays back from your storage — never upstream.'
+        }
       >
-        <ul className="flex flex-col gap-2">
-          {media.variants.map((v) => {
-            const isPersisted = v.state === 'PERSISTED';
-            const checked = selected.has(v.quality) || isPersisted;
-            return (
-              <li key={v.id}>
-                <label
-                  className={cn(
-                    'flex cursor-pointer items-center justify-between gap-3 rounded-xl border p-3 transition-colors',
-                    isPersisted
-                      ? 'border-success/40 bg-success/5 cursor-default'
-                      : checked
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border hover:bg-muted',
-                  )}
-                >
-                  <span className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      disabled={isPersisted}
-                      onChange={() => toggle(v.quality)}
-                      className="h-4 w-4 accent-primary"
-                    />
-                    <span>
-                      <span className="block text-sm font-medium text-fg">{v.quality}</span>
-                      {v.width && v.height && (
-                        <span className="block text-xs text-muted-fg">
-                          {v.width}×{v.height}
-                        </span>
+        {savedMediaId ? (
+          <div className="space-y-4">
+            <p className="text-sm text-fg-soft">
+              We&rsquo;re downloading the qualities you picked into your permanent storage. You can
+              keep this tab open or jump to the watch page to see live progress.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <DialogClose asChild>
+                <Button variant="ghost" size="md">
+                  Stay here
+                </Button>
+              </DialogClose>
+              <Button asChild size="md">
+                <Link href={`/watch/${savedMediaId}`}>Open watch page</Link>
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <ul className="flex flex-col gap-2">
+              {media.variants.map((v) => {
+                const isPersisted = v.state === 'PERSISTED';
+                const checked = selected.has(v.quality) || isPersisted;
+                return (
+                  <li key={v.id}>
+                    <label
+                      className={cn(
+                        'flex cursor-pointer items-center justify-between gap-3 rounded-xl border p-3 transition-colors',
+                        isPersisted
+                          ? 'border-success/40 bg-success/5 cursor-default'
+                          : checked
+                            ? 'border-primary bg-primary/5'
+                            : 'border-border hover:bg-muted',
                       )}
-                    </span>
-                  </span>
-                  <span className="text-right">
-                    <span className="block text-sm tabular-nums text-fg-soft">
-                      {formatBytes(v.sizeBytes)}
-                    </span>
-                    {isPersisted && (
-                      <span className="block text-[10px] font-medium uppercase tracking-wide text-success">
-                        in library
+                    >
+                      <span className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={isPersisted}
+                          onChange={() => toggle(v.quality)}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <span>
+                          <span className="block text-sm font-medium text-fg">{v.quality}</span>
+                          {v.width && v.height && (
+                            <span className="block text-xs text-muted-fg">
+                              {v.width}×{v.height}
+                            </span>
+                          )}
+                        </span>
                       </span>
-                    )}
-                  </span>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
+                      <span className="text-right">
+                        <span className="block text-sm tabular-nums text-fg-soft">
+                          {formatBytes(v.sizeBytes)}
+                        </span>
+                        {isPersisted && (
+                          <span className="block text-[10px] font-medium uppercase tracking-wide text-success">
+                            in library
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
 
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <DialogClose asChild>
-            <Button variant="ghost" size="md">
-              Cancel
-            </Button>
-          </DialogClose>
-          <Button onClick={onSubmit} size="md" disabled={selected.size === 0 || save.isPending}>
-            {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            Save {selected.size > 0 ? `(${selected.size})` : ''}
-          </Button>
-        </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <DialogClose asChild>
+                <Button variant="ghost" size="md">
+                  Cancel
+                </Button>
+              </DialogClose>
+              <Button onClick={onSubmit} size="md" disabled={selected.size === 0 || save.isPending}>
+                {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Save {selected.size > 0 ? `(${selected.size})` : ''}
+              </Button>
+            </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

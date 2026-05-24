@@ -4,6 +4,7 @@ import { AppError } from '../../lib/errors.js';
 import { buildContentDisposition, buildDownloadFilename } from '../../lib/filename.js';
 import { verify } from '../../services/signing/signed-url.js';
 import { cacheStorage, permanentStorage } from '../../services/storage/index.js';
+import { joinKey } from '../../services/storage/verify.js';
 import { proxyStream, serveStored } from './stream.proxy.js';
 import {
   buildRewrittenPlaylist,
@@ -12,8 +13,28 @@ import {
 } from './stream.service.js';
 import { refreshVariantUpstream } from '../ingest/ingest.service.js';
 
+/**
+ * /api/v1/stream/* routes — live/cached preview path.
+ *
+ * Decision tree per request:
+ *
+ *   1. variant is PERSISTED?
+ *        → serve from permanent storage at media/{mediaId}/hls/{quality}/...
+ *
+ *   2. cache hit?
+ *        → serve from cacheStorage()
+ *
+ *   3. else proxy from upstream (with write-through into cacheStorage()).
+ *
+ * Saved-only routes (/api/v1/library/...) bypass this module entirely and
+ * never touch upstream URLs.
+ */
+
 const VariantParam = z.object({ variantId: z.string().min(1) });
-const SegmentParam = z.object({ variantId: z.string().min(1), index: z.coerce.number().int().nonnegative() });
+const SegmentParam = z.object({
+  variantId: z.string().min(1),
+  index: z.coerce.number().int().nonnegative(),
+});
 const SignedQuery = z.object({
   t: z.string(),
   exp: z.string(),
@@ -40,7 +61,6 @@ function requireSig(req: { query: unknown }, variantId: string, resource: string
 }
 
 const streamRoutes: FastifyPluginAsync = async (app) => {
-  // Preflight handler for HLS players that send OPTIONS for ranged segment fetches.
   app.options('/:variantId/*', async (_req, reply) => {
     applyStreamCors(reply);
     reply.status(204).send();
@@ -54,8 +74,8 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
 
     const variant = await loadVariant(variantId);
 
-    if (variant.state === 'PERSISTED' && variant.storageKey) {
-      const key = `${variant.storageKey}/playlist.m3u8`;
+    if (variant.state === 'PERSISTED' && variant.hlsPlaylistKey && variant.media.storageKey) {
+      const key = joinKey(variant.media.storageKey, variant.hlsPlaylistKey);
       await serveStored(req, reply, permanentStorage(), key, {
         contentType: 'application/vnd.apple.mpegurl',
         cacheControl: 'private, no-store',
@@ -97,8 +117,11 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
 
     const variant = await loadVariant(variantId);
 
-    if (variant.state === 'PERSISTED' && variant.storageKey) {
-      const key = `${variant.storageKey}/seg-${index}.ts`;
+    if (variant.state === 'PERSISTED' && variant.hlsSegmentDir && variant.media.storageKey) {
+      const key = joinKey(
+        variant.media.storageKey,
+        `${variant.hlsSegmentDir}/seg-${index}.ts`,
+      );
       await serveStored(req, reply, permanentStorage(), key, {
         cacheControl: 'public, max-age=31536000, immutable',
       });
@@ -133,7 +156,7 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  // ── Direct file (MP4 etc) ──────────────────────────────────────────────────
+  // ── Direct file ────────────────────────────────────────────────────────────
   app.get('/:variantId/file', async (req, reply) => {
     const { variantId } = VariantParam.parse(req.params);
     requireSig(req, variantId, 'file');
@@ -141,8 +164,9 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
 
     const variant = await loadVariant(variantId);
 
-    if (variant.state === 'PERSISTED' && variant.storageKey) {
-      await serveStored(req, reply, permanentStorage(), `${variant.storageKey}/file.bin`, {
+    if (variant.state === 'PERSISTED' && variant.fileKey && variant.media.storageKey) {
+      const key = joinKey(variant.media.storageKey, variant.fileKey);
+      await serveStored(req, reply, permanentStorage(), key, {
         cacheControl: 'public, max-age=3600',
       });
       return;
@@ -167,7 +191,7 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  // ── Download (Content-Disposition with RFC5987 filename) ──────────────────
+  // ── Download (RFC 6266 / 5987 filename) ────────────────────────────────────
   app.get('/:variantId/download', async (req, reply) => {
     const { variantId } = VariantParam.parse(req.params);
     requireSig(req, variantId, 'download');
@@ -179,11 +203,11 @@ const streamRoutes: FastifyPluginAsync = async (app) => {
       quality: variant.quality,
       container: variant.container,
     });
-    const contentDisposition = buildContentDisposition('attachment', filename);
-    reply.header('Content-Disposition', contentDisposition);
+    reply.header('Content-Disposition', buildContentDisposition('attachment', filename));
 
-    if (variant.state === 'PERSISTED' && variant.storageKey) {
-      await serveStored(req, reply, permanentStorage(), `${variant.storageKey}/file.bin`, {
+    if (variant.state === 'PERSISTED' && variant.fileKey && variant.media.storageKey) {
+      const key = joinKey(variant.media.storageKey, variant.fileKey);
+      await serveStored(req, reply, permanentStorage(), key, {
         cacheControl: 'private, no-store',
       });
       return;

@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
 import {
   forgotPassword as forgotPasswordApi,
   getMe,
@@ -30,6 +31,41 @@ export function isRegistered(user: PublicUser | null | undefined): user is Publi
   return !!user && user.kind === 'REGISTERED';
 }
 
+/**
+ * Stable auth gate.
+ *
+ *   - `ready === true` means the auth bootstrap query has settled at least
+ *     once (success OR error). Pages MUST NOT redirect before this is true,
+ *     otherwise they race with the cookie/getMe round-trip and create the
+ *     login-loop bug we saw in v2.
+ *   - When ready and not registered, this hook redirects to /auth/login
+ *     once with a `next` param.
+ *   - When ready and registered, callers can render the gated UI.
+ */
+export interface AuthGate {
+  ready: boolean;
+  user: PublicUser | null;
+  isRegistered: boolean;
+}
+
+export function useAuthGate(returnTo: string): AuthGate {
+  const router = useRouter();
+  const q = useCurrentUser();
+  const ready = !q.isPending; // first settle (data OR error)
+  const user = q.data?.user ?? null;
+  const registered = isRegistered(user);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!registered) {
+      const next = encodeURIComponent(returnTo);
+      router.replace(`/auth/login?next=${next}`);
+    }
+  }, [ready, registered, router, returnTo]);
+
+  return { ready, user, isRegistered: registered };
+}
+
 export function useSignup() {
   return useMutation({
     mutationFn: (args: { email: string; password: string; displayName?: string }) => signupApi(args),
@@ -40,9 +76,13 @@ export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (args: { email: string; password: string }) => loginApi(args),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
+      // Prime the cache synchronously, then force /auth/me to refetch and
+      // settle BEFORE callers navigate. This eliminates the login-loop where
+      // the next page sees a stale "user: null" before the cookie round-trip.
       qc.setQueryData(ME_KEY, { user: data.user });
-      qc.invalidateQueries({ queryKey: ['library'] });
+      await qc.invalidateQueries({ queryKey: ['library'] }).catch(() => undefined);
+      await qc.refetchQueries({ queryKey: ME_KEY }).catch(() => undefined);
     },
   });
 }

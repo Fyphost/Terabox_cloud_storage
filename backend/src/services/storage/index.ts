@@ -23,4 +23,11 @@ export function permanentStorage(): StorageBackend {
   return _permanent;
 }
 
-export type { StorageBackend, ByteRange, ReadResult, WriteResult } from './storage.interface.js';
+export type {
+  StorageBackend,
+  ByteRange,
+  ReadResult,
+  WriteResult,
+  ListedObject,
+  StorageStat,
+} from './storage.interface.js';

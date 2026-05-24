@@ -1,25 +1,15 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useEffect } from 'react';
 import { Loader2, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useCurrentUser, useLogout, isRegistered } from '@/hooks/use-auth';
+import { useAuthGate, useLogout } from '@/hooks/use-auth';
 
 export default function AccountPage() {
-  const router = useRouter();
-  const { data, isLoading } = useCurrentUser();
+  const auth = useAuthGate('/account');
   const logout = useLogout();
-  const user = data?.user;
 
-  useEffect(() => {
-    if (!isLoading && !isRegistered(user)) {
-      router.replace('/auth/login?next=/account');
-    }
-  }, [isLoading, user, router]);
-
-  if (isLoading || !isRegistered(user)) {
+  if (!auth.ready || !auth.isRegistered) {
     return (
       <div className="container py-10">
         <Skeleton className="h-8 w-40" />
@@ -27,6 +17,8 @@ export default function AccountPage() {
       </div>
     );
   }
+
+  const user = auth.user!;
 
   return (
     <div className="container max-w-2xl py-8 md:py-12">
