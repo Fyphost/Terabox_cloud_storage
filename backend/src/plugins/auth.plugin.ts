@@ -1,3 +1,17 @@
+/**
+ * Auth plugin — JWT + Cookie lifecycle.
+ *
+ * Root cause of FST_ERR_DEC_ALREADY_PRESENT:
+ *   @fastify/cookie adds a `serializeCookie` decorator to the Fastify instance.
+ *   If ANY other plugin (cors, rate-limit, etc.) also registers @fastify/cookie,
+ *   the second registration throws FST_ERR_DEC_ALREADY_PRESENT.
+ *
+ * Fix:
+ *   1. Guard @fastify/cookie registration with `app.hasDecorator('serializeCookie')`.
+ *   2. Use fastify-plugin (fp) so decorators propagate to the root scope.
+ *   3. This plugin is the ONLY place that registers @fastify/cookie and @fastify/jwt.
+ */
+
 import fp from 'fastify-plugin';
 import jwt from '@fastify/jwt';
 import cookie from '@fastify/cookie';
@@ -27,31 +41,53 @@ declare module '@fastify/jwt' {
 }
 
 export default fp(async function authPlugin(app) {
-  await app.register(cookie, {});
-  await app.register(jwt, {
-    secret: env.JWT_SECRET,
-    cookie: { cookieName: ACCESS_COOKIE, signed: false },
-  });
+  // Guard: only register @fastify/cookie if not already present.
+  // This prevents FST_ERR_DEC_ALREADY_PRESENT when plugins are loaded in
+  // different orders or when testing with app.inject().
+  if (!app.hasDecorator('serializeCookie')) {
+    await app.register(cookie, {});
+  }
 
-  app.decorateRequest('userId', undefined);
-  app.decorateRequest('userRole', undefined);
-  app.decorateRequest('userKind', undefined);
+  // Guard: only register @fastify/jwt once.
+  if (!app.hasDecorator('jwt')) {
+    await app.register(jwt, {
+      secret: env.JWT_SECRET,
+      cookie: { cookieName: ACCESS_COOKIE, signed: false },
+    });
+  }
 
-  app.decorateRequest('requireUser', function (this: any) {
-    if (!this.userId) throw new AppError('UNAUTHORIZED', 'Authentication required');
-    return this.userId;
-  });
-  app.decorateRequest('requireRegistered', function (this: any) {
-    if (!this.userId || this.userKind !== 'REGISTERED') {
-      throw new AppError('UNAUTHORIZED', 'Sign in to continue');
-    }
-    return this.userId;
-  });
-  app.decorateRequest('requireAdmin', function (this: any) {
-    if (!this.userId) throw new AppError('UNAUTHORIZED', 'Authentication required');
-    if (this.userRole !== 'ADMIN') throw new AppError('FORBIDDEN', 'Admin access required');
-    return this.userId;
-  });
+  // Decorator guards: prevent double-registration in test harnesses.
+  if (!app.hasRequestDecorator('userId')) {
+    app.decorateRequest('userId', undefined);
+  }
+  if (!app.hasRequestDecorator('userRole')) {
+    app.decorateRequest('userRole', undefined);
+  }
+  if (!app.hasRequestDecorator('userKind')) {
+    app.decorateRequest('userKind', undefined);
+  }
+
+  if (!app.hasRequestDecorator('requireUser')) {
+    app.decorateRequest('requireUser', function (this: any) {
+      if (!this.userId) throw new AppError('UNAUTHORIZED', 'Authentication required');
+      return this.userId;
+    });
+  }
+  if (!app.hasRequestDecorator('requireRegistered')) {
+    app.decorateRequest('requireRegistered', function (this: any) {
+      if (!this.userId || this.userKind !== 'REGISTERED') {
+        throw new AppError('UNAUTHORIZED', 'Sign in to continue');
+      }
+      return this.userId;
+    });
+  }
+  if (!app.hasRequestDecorator('requireAdmin')) {
+    app.decorateRequest('requireAdmin', function (this: any) {
+      if (!this.userId) throw new AppError('UNAUTHORIZED', 'Authentication required');
+      if (this.userRole !== 'ADMIN') throw new AppError('FORBIDDEN', 'Admin access required');
+      return this.userId;
+    });
+  }
 
   app.addHook('preHandler', async (req) => {
     try {
@@ -63,7 +99,7 @@ export default fp(async function authPlugin(app) {
         req.userRole = (d.role as 'USER' | 'ADMIN' | undefined) ?? 'USER';
       }
     } catch {
-      /* anonymous */
+      /* anonymous — no token or invalid token */
     }
   });
 });

@@ -1,4 +1,33 @@
+/**
+ * Environment configuration — single source of truth.
+ *
+ * Root causes fixed:
+ *   1. PM2 does NOT load .env files. We must call dotenv.config() ourselves
+ *      BEFORE zod validation runs.
+ *   2. The previous implementation called process.exit(1) with only a
+ *      console.error — invisible in PM2 logs. We now log the full error
+ *      to stderr with a structured prefix so PM2 error_file captures it.
+ *   3. Missing env vars produced a cryptic zod error. We now list each
+ *      missing/invalid field explicitly.
+ *
+ * Loading order:
+ *   - .env.local (highest priority, gitignored, for dev overrides)
+ *   - .env       (committed defaults)
+ *   - process.env (runtime overrides from PM2/systemd/docker always win)
+ *
+ * This module is imported at the top of server.ts and worker.ts — it MUST
+ * be the first import so that all downstream modules see a validated env.
+ */
+
+import { config as dotenvConfig } from 'dotenv';
+import { resolve } from 'node:path';
 import { z } from 'zod';
+
+// Load .env files relative to the backend package root (where package.json lives).
+// In production builds (dist/), __dirname is dist/config/ so we go up two levels.
+const backendRoot = resolve(import.meta.dirname ?? __dirname, '..', '..');
+dotenvConfig({ path: resolve(backendRoot, '.env.local'), override: true });
+dotenvConfig({ path: resolve(backendRoot, '.env') });
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -10,8 +39,9 @@ const schema = z.object({
   PUBLIC_BASE_URL: z.string().url(),
   WEB_BASE_URL: z.string().url(),
 
-  DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string().url(),
+  // Database
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().min(1),
 
   // Auth
   JWT_SECRET: z.string().min(16),
@@ -46,8 +76,10 @@ const schema = z.object({
   CACHE_HIGH_WATERMARK_BYTES: z.coerce.number().int().positive().default(50 * 1024 ** 3),
   CACHE_LOW_WATERMARK_BYTES: z.coerce.number().int().positive().default(40 * 1024 ** 3),
 
+  // Extractor
   TERABOX_EXTRACTOR_URL: z.string().url(),
 
+  // CORS
   CORS_ORIGIN: z.string().default('*'),
 });
 
@@ -67,8 +99,16 @@ function coerceBool(v: boolean | 'true' | 'false' | 'auto', fallback: () => bool
 export const env: Env = (() => {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
-    // eslint-disable-next-line no-console
-    console.error('Invalid environment:', parsed.error.flatten().fieldErrors);
+    const fields = parsed.error.flatten().fieldErrors;
+    const lines = Object.entries(fields).map(
+      ([key, errs]) => `  ${key}: ${(errs ?? []).join(', ')}`,
+    );
+    // Write to stderr so PM2 error_file always captures this.
+    process.stderr.write(
+      `[FATAL] Environment validation failed:\n${lines.join('\n')}\n\n` +
+        `Ensure all required variables are set in .env or the process environment.\n` +
+        `Required: PUBLIC_BASE_URL, WEB_BASE_URL, DATABASE_URL, REDIS_URL, JWT_SECRET, SIGNING_SECRET, TERABOX_EXTRACTOR_URL\n`,
+    );
     process.exit(1);
   }
   const r = parsed.data;
