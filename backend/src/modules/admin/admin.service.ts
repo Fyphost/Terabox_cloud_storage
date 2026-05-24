@@ -1,3 +1,4 @@
+import type { Queue } from 'bullmq';
 import { prisma } from '../../config/prisma.js';
 import { saveQueue } from '../../queues/save.queue.js';
 import { cacheCleanupQueue, storageCleanupQueue } from '../../queues/cleanup.queue.js';
@@ -81,14 +82,20 @@ async function sumCacheBytes(): Promise<number> {
   return Number(r._sum.bytes ?? 0);
 }
 
-async function queueCounts(q: { getJobCounts: (...s: string[]) => Promise<Record<string, number>> }): Promise<QueueCounts> {
+/**
+ * Use BullMQ's Queue type directly. The previous structural type
+ * `(...s: string[]) => Promise<Record<string, number>>` failed to match
+ * because BullMQ types getJobCounts as `(...types: JobType[])` where
+ * JobType is a string-literal union, not `string`.
+ */
+async function queueCounts(q: Queue<any, any, string>): Promise<QueueCounts> {
   const c = await q.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed');
   return {
-    waiting: c.waiting ?? 0,
-    active: c.active ?? 0,
-    delayed: c.delayed ?? 0,
-    completed: c.completed ?? 0,
-    failed: c.failed ?? 0,
+    waiting: c['waiting'] ?? 0,
+    active: c['active'] ?? 0,
+    delayed: c['delayed'] ?? 0,
+    completed: c['completed'] ?? 0,
+    failed: c['failed'] ?? 0,
   };
 }
 

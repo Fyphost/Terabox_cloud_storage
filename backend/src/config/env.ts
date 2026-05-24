@@ -20,12 +20,14 @@
  */
 
 import { config as dotenvConfig } from 'dotenv';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 
-// Load .env files relative to the backend package root (where package.json lives).
-// In production builds (dist/), __dirname is dist/config/ so we go up two levels.
-const backendRoot = resolve(import.meta.dirname ?? __dirname, '..', '..');
+// Resolve backend package root from this module's location.
+// In dist/, this file lives at dist/config/env.js → backendRoot = dist/..
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const backendRoot = resolve(moduleDir, '..', '..');
 dotenvConfig({ path: resolve(backendRoot, '.env.local'), override: true });
 dotenvConfig({ path: resolve(backendRoot, '.env') });
 

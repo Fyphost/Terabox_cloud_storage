@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import sensible from '@fastify/sensible';
 import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
@@ -19,7 +19,10 @@ import adminRoutes from './modules/admin/admin.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
-    logger,
+    // Pino's Logger type has extra ceremony fields (version, levels, etc.)
+    // that are NOT part of FastifyBaseLogger. Runtime is fully compatible —
+    // the cast silences the structural mismatch between pino v9 and Fastify v4.
+    logger: logger as unknown as FastifyBaseLogger,
     disableRequestLogging: false,
     trustProxy: true,
     bodyLimit: 1 * 1024 * 1024,
