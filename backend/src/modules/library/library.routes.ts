@@ -236,6 +236,8 @@ const libraryRoutes: FastifyPluginAsync = async (app) => {
   });
 
   // ── Signed media: download ────────────────────────────────────────────────
+  // Downloads ALWAYS serve the persisted source MP4 file, never the HLS
+  // playlist. If no source file exists yet, return a clear 404.
   app.get('/:savedMediaId/variant/:variantId/download', async (req, reply) => {
     const { savedMediaId, variantId } = VariantParam.parse(req.params);
     requireSig(req, savedMediaId, `variant/${variantId}/download`);
@@ -247,37 +249,54 @@ const libraryRoutes: FastifyPluginAsync = async (app) => {
     });
     if (!sv) throw new AppError('NOT_FOUND', 'Variant not in saved media');
     if (sv.variant.state !== 'PERSISTED') {
-      throw new AppError('NOT_FOUND', 'Variant not persisted');
+      throw new AppError('NOT_FOUND', 'Variant not persisted yet');
     }
 
+    const media = sv.variant.media;
+
+    // Build a proper filename: "VideoName (720p).mp4"
     const filename = buildDownloadFilename({
-      baseName: sv.variant.media.name || 'media',
+      baseName: media.name || 'video',
       quality: sv.variant.quality,
-      container: sv.variant.container,
+      container: 'MP4',
+      mime: 'video/mp4',
     });
     reply.header('Content-Disposition', buildContentDisposition('attachment', filename));
+    reply.header('Content-Type', 'video/mp4');
 
-    if (sv.variant.container === 'MP4' && sv.variant.fileKey) {
-      const key = joinKey(sv.variant.media.storageKey, sv.variant.fileKey);
-      await serveStored(req, reply, permanentStorage(), key, {
-        cacheControl: 'private, no-store',
-        contentType: 'video/mp4',
-      });
-      return;
+    // Priority 1: Serve the persisted source MP4 (canonical download file).
+    if (media.originalKey && media.storageKey) {
+      const key = joinKey(media.storageKey, media.originalKey);
+      const exists = await permanentStorage().exists(key);
+      if (exists) {
+        await serveStored(req, reply, permanentStorage(), key, {
+          cacheControl: 'private, no-store',
+          contentType: 'video/mp4',
+        });
+        return;
+      }
     }
 
-    // HLS variant — build a remuxed mp4 on the fly is out of scope here. For
-    // v3 we surface the segments as a downloadable .ts container OR refuse
-    // download. Refusing is the safer default; instead we expose the
-    // playlist for users who want to "Save link as".
-    if (!sv.variant.hlsPlaylistKey) {
-      throw new AppError('NOT_FOUND', 'No downloadable file for this variant');
+    // Priority 2: If variant has a direct fileKey (MP4 container).
+    if (sv.variant.container === 'MP4' && sv.variant.fileKey && media.storageKey) {
+      const key = joinKey(media.storageKey, sv.variant.fileKey);
+      const exists = await permanentStorage().exists(key);
+      if (exists) {
+        await serveStored(req, reply, permanentStorage(), key, {
+          cacheControl: 'private, no-store',
+          contentType: 'video/mp4',
+        });
+        return;
+      }
     }
-    const key = joinKey(sv.variant.media.storageKey, sv.variant.hlsPlaylistKey);
-    await serveStored(req, reply, permanentStorage(), key, {
-      cacheControl: 'private, no-store',
-      contentType: 'application/vnd.apple.mpegurl',
-    });
+
+    // If neither source MP4 nor variant MP4 exists, the download is
+    // genuinely unavailable. Do NOT serve the HLS playlist — that
+    // produces the corrupt ~200B "download" users reported.
+    throw new AppError(
+      'NOT_FOUND',
+      'Source file not yet available. The system is still processing this media.',
+    );
   });
 
   // ── Signed media: thumbnail ──────────────────────────────────────────────

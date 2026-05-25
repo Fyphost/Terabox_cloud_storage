@@ -10,6 +10,7 @@ const _savedVariant = make(20);
 const _cache = make(20);
 const _user = make(22);
 const _session = make(24);
+const _shareToken = make(32);
 
 export const newMediaId = (): string => `med_${_media()}`;
 export const newVariantId = (): string => `var_${_variant()}`;
@@ -18,3 +19,5 @@ export const newSavedVariantId = (): string => `svr_${_savedVariant()}`;
 export const newCacheId = (): string => `cch_${_cache()}`;
 export const newUserId = (): string => `usr_${_user()}`;
 export const newSessionId = (): string => `ses_${_session()}`;
+export const newShareTokenId = (): string => `shr_${make(16)()}`;
+export const newShareToken = (): string => _shareToken();

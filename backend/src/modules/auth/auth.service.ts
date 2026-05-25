@@ -55,7 +55,23 @@ export interface PublicUser {
   createdAt: string;
 }
 
-export type AccessTokenSigner = (payload: object, opts: { expiresIn: number }) => Promise<string>;
+/**
+ * Strongly-typed payload shape that mirrors `@fastify/jwt`'s FastifyJWT.payload
+ * declaration in plugins/auth.plugin.ts. Using `object` here was too loose
+ * and caused TypeScript to union ALL jwtSign overloads — including the
+ * callback overload that returns `void` — producing a confusing
+ * `Promise<Promise<string> & void>` mismatch at every call site.
+ */
+export interface AccessTokenPayload {
+  sub: string;
+  kind: 'ANON' | 'REGISTERED';
+  role?: 'USER' | 'ADMIN';
+}
+
+export type AccessTokenSigner = (
+  payload: AccessTokenPayload,
+  opts: { expiresIn: number },
+) => Promise<string>;
 
 interface SessionContext {
   ip?: string | null;

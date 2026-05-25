@@ -240,10 +240,14 @@ model SavedMedia {
   media       Media      @relation(fields: [mediaId], references: [id], onDelete: Cascade)
 
   state       SavedState @default(PENDING)
+  /// The ONE quality the user selected for download. Only this quality's
+  /// source file is served from the download endpoint.
+  canonicalQuality String?
   createdAt   DateTime   @default(now())
   completedAt DateTime?
 
   variants    SavedVariant[]
+  shareTokens ShareToken[]
 
   @@unique([userId, mediaId])
   @@index([userId, createdAt])
@@ -336,4 +340,26 @@ model QueueJob {
 
   @@index([queue, status])
   @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Share tokens (permanent public sharing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ShareToken {
+  id           String     @id
+  savedMediaId String
+  saved        SavedMedia @relation(fields: [savedMediaId], references: [id], onDelete: Cascade)
+  /// Unique opaque token used in public URL: /share/{token}
+  token        String     @unique
+  /// Optional: restrict to specific quality for the share link
+  quality      String?
+  /// Allow disabling shares without deletion
+  enabled      Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  expiresAt    DateTime?
+  accessCount  Int        @default(0)
+
+  @@index([savedMediaId])
+  @@index([token])
 }

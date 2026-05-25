@@ -19,6 +19,8 @@ import {
   resetPassword,
   signup,
   verifyEmail,
+  type AccessTokenPayload,
+  type AccessTokenSigner,
 } from './auth.service.js';
 
 const SignupBody = z.object({
@@ -135,9 +137,13 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     { config: { rateLimit: { max: 20, timeWindow: '10 minutes' } } },
     async (req, reply) => {
       const body = LoginBody.parse(req.body);
+      // Type-annotated lambda forces TS to pick the correct jwtSign overload
+      // (the Promise<string> one, not the void-returning callback one).
+      const signAccess: AccessTokenSigner = (payload: AccessTokenPayload, opts) =>
+        reply.jwtSign(payload, opts);
       const tokens = await login(
         body,
-        async (payload, opts) => reply.jwtSign(payload, opts),
+        signAccess,
         {
           ip: req.ip,
           userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
@@ -154,9 +160,11 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       const presented = req.cookies[REFRESH_COOKIE];
       if (!presented) throw new AppError('UNAUTHORIZED', 'No session');
+      const signAccess: AccessTokenSigner = (payload: AccessTokenPayload, opts) =>
+        reply.jwtSign(payload, opts);
       const tokens = await refreshSession(
         presented,
-        async (payload, opts) => reply.jwtSign(payload, opts),
+        signAccess,
         {
           ip: req.ip,
           userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,

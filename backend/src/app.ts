@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import sensible from '@fastify/sensible';
 import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
@@ -15,11 +15,15 @@ import mediaRoutes from './modules/media/media.routes.js';
 import streamRoutes from './modules/stream/stream.routes.js';
 import saveRoutes from './modules/save/save.routes.js';
 import libraryRoutes from './modules/library/library.routes.js';
+import shareRoutes from './modules/share/share.routes.js';
 import adminRoutes from './modules/admin/admin.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
-    logger,
+    // Pino's Logger type has extra ceremony fields (version, levels, etc.)
+    // that are NOT part of FastifyBaseLogger. Runtime is fully compatible —
+    // the cast silences the structural mismatch between pino v9 and Fastify v4.
+    logger: logger as unknown as FastifyBaseLogger,
     disableRequestLogging: false,
     trustProxy: true,
     bodyLimit: 1 * 1024 * 1024,
@@ -38,6 +42,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(streamRoutes, { prefix: '/api/v1/stream' });
   await app.register(saveRoutes, { prefix: '/api/v1/save' });
   await app.register(libraryRoutes, { prefix: '/api/v1/library' });
+  await app.register(shareRoutes, { prefix: '/api/v1/share' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
 
   app.get('/', async () => ({ name: 'fyphost', env: env.NODE_ENV }));

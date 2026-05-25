@@ -55,6 +55,7 @@ import {
   hlsRoot,
   mediaDir,
   metadataKey,
+  originalFileKey,
   stagingPlaylistKey,
   stagingSegmentKey,
   thumbnailKey,
@@ -406,7 +407,74 @@ async function processHlsVariant(
   return { bytes: Number(progressTracker.bytesDone), segmentCount: total };
 }
 
-// ─── Thumbnail ──────────────────────────────────────────────────────────────
+// ─── Source MP4 download (for direct downloads) ─────────────────────────────
+
+/**
+ * Downloads the upstream direct file URL (MP4) into permanent storage at
+ * source/original.mp4 under the media root. This is the ONLY file served
+ * for download endpoints — never the HLS playlist.
+ *
+ * This is idempotent: if the file already exists on disk, it skips.
+ * The Media.originalKey column tracks whether this has completed.
+ */
+async function downloadSourceFile(
+  job: Job<SaveJobData>,
+  media: Media,
+  variant: MediaVariant,
+): Promise<{ bytes: number; sha256: string } | null> {
+  // If we already have the source file persisted, skip.
+  if (media.originalKey) {
+    const exists = await permanentStorage().exists(
+      joinKey(media.storageKey, media.originalKey),
+    );
+    if (exists) return null;
+  }
+
+  // Get the upstream direct download URL from the variant or media.
+  const downloadUrl = variant.upstreamFileUrl;
+  if (!downloadUrl) {
+    logger.info({ mediaId: media.id }, 'no upstream download URL; skipping source file');
+    return null;
+  }
+
+  const targetKey = originalFileKey(media.id);
+  logger.info({ mediaId: media.id, targetKey }, 'downloading source MP4');
+
+  let resp = await upstreamRequest(downloadUrl, { method: 'GET' });
+  if (resp.statusCode === 403 || resp.statusCode === 404) {
+    resp.body.resume();
+    // Try refreshing the variant to get a new download URL
+    const refreshed = await refreshVariantUpstream(variant.id);
+    if (!refreshed) {
+      logger.warn({ mediaId: media.id }, 'source file download: refresh failed');
+      return null;
+    }
+    // Re-read the variant to get the new upstreamFileUrl
+    const updatedVariant = await prisma.mediaVariant.findUnique({
+      where: { id: variant.id },
+    });
+    if (!updatedVariant?.upstreamFileUrl) return null;
+    resp = await upstreamRequest(updatedVariant.upstreamFileUrl, { method: 'GET' });
+  }
+  if (resp.statusCode >= 400) {
+    resp.body.resume();
+    logger.warn(
+      { mediaId: media.id, statusCode: resp.statusCode },
+      'source file download failed (non-fatal)',
+    );
+    return null;
+  }
+
+  const result = await permanentStorage().write(targetKey, Readable.from(resp.body), {
+    contentType: 'video/mp4',
+  });
+
+  logger.info(
+    { mediaId: media.id, bytes: result.bytes },
+    'source MP4 downloaded successfully',
+  );
+  return result;
+}
 
 async function ensureThumbnail(media: Media): Promise<{ written: boolean }> {
   if (media.thumbnailKey) return { written: false };
@@ -534,6 +602,10 @@ export function startSaveWorker(): Worker<SaveJobData> {
           });
           const thumbResult = await ensureThumbnail(mediaForRun);
 
+          // 4b. Download source MP4 for direct download endpoints.
+          // This is the canonical downloadable file — NOT the HLS playlist.
+          const sourceResult = await downloadSourceFile(job, mediaForRun, v);
+
           // 5. FINALIZING — verify staging, atomic rename, re-verify final.
           await setVariantState(v.id, 'FINALIZING', {
             step: 'verifying & promoting',
@@ -602,10 +674,17 @@ export function startSaveWorker(): Worker<SaveJobData> {
                 sizeBytes: BigInt(postCheck.bytes),
               },
             });
+            const mediaUpdate: Record<string, unknown> = {};
             if (thumbResult.written && !mediaForRun.thumbnailKey) {
+              mediaUpdate.thumbnailKey = thumbnailKey(mediaForRun.id).split('/').slice(1).join('/');
+            }
+            if (sourceResult && !mediaForRun.originalKey) {
+              mediaUpdate.originalKey = 'original/file.mp4';
+            }
+            if (Object.keys(mediaUpdate).length > 0) {
               await tx.media.update({
                 where: { id: mediaForRun.id },
-                data: { thumbnailKey: thumbnailKey(mediaForRun.id).split('/').slice(1).join('/') },
+                data: mediaUpdate,
               });
             }
           });

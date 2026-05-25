@@ -20,12 +20,14 @@
  */
 
 import { config as dotenvConfig } from 'dotenv';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 
-// Load .env files relative to the backend package root (where package.json lives).
-// In production builds (dist/), __dirname is dist/config/ so we go up two levels.
-const backendRoot = resolve(import.meta.dirname ?? __dirname, '..', '..');
+// Resolve backend package root from this module's location.
+// In dist/, this file lives at dist/config/env.js → backendRoot = dist/..
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const backendRoot = resolve(moduleDir, '..', '..');
 dotenvConfig({ path: resolve(backendRoot, '.env.local'), override: true });
 dotenvConfig({ path: resolve(backendRoot, '.env') });
 
@@ -100,15 +102,13 @@ export const env: Env = (() => {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
     const fields = parsed.error.flatten().fieldErrors;
-    const lines = Object.entries(fields).map(
-      ([key, errs]) => `  ${key}: ${(errs ?? []).join(', ')}`,
-    );
-    // Write to stderr so PM2 error_file always captures this.
-    process.stderr.write(
-      `[FATAL] Environment validation failed:\n${lines.join('\n')}\n\n` +
-        `Ensure all required variables are set in .env or the process environment.\n` +
-        `Required: PUBLIC_BASE_URL, WEB_BASE_URL, DATABASE_URL, REDIS_URL, JWT_SECRET, SIGNING_SECRET, TERABOX_EXTRACTOR_URL\n`,
-    );
+    console.error('[FATAL] Environment validation failed:');
+    for (const [key, errs] of Object.entries(fields)) {
+      console.error('  ' + key + ': ' + (errs ?? []).join(', '));
+    }
+    console.error('');
+    console.error('Required: PUBLIC_BASE_URL, WEB_BASE_URL, DATABASE_URL,');
+    console.error('  REDIS_URL, JWT_SECRET, SIGNING_SECRET, TERABOX_EXTRACTOR_URL');
     process.exit(1);
   }
   const r = parsed.data;

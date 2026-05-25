@@ -11,7 +11,7 @@
  *      use and createBullConnection() for queue/worker constructors.
  */
 
-import IORedis, { type Redis } from 'ioredis';
+import { Redis } from 'ioredis';
 import { env } from './env.js';
 import { logger } from '../lib/logger.js';
 
@@ -23,22 +23,24 @@ let _redis: Redis | null = null;
  */
 export function getRedis(): Redis {
   if (_redis) return _redis;
-  _redis = new IORedis(env.REDIS_URL, {
+  // Build a local const so TS narrows it as non-null in the closures below.
+  const client = new Redis(env.REDIS_URL, {
     maxRetriesPerRequest: null, // required by BullMQ if same connection is reused
     enableReadyCheck: true,
     lazyConnect: false,
-    retryStrategy(times) {
+    retryStrategy(times: number): number {
       // Exponential backoff capped at 10s.
       return Math.min(times * 500, 10_000);
     },
   });
-  _redis.on('error', (err) => {
+  client.on('error', (err: Error) => {
     logger.error({ err: err.message }, 'redis connection error');
   });
-  _redis.on('connect', () => {
+  client.on('connect', () => {
     logger.info('redis connected');
   });
-  return _redis;
+  _redis = client;
+  return client;
 }
 
 /**
@@ -66,15 +68,15 @@ export async function validateRedis(timeoutMs = 5000): Promise<void> {
  * connections for producers vs consumers.
  */
 export function createBullConnection(): Redis {
-  const conn = new IORedis(env.REDIS_URL, {
+  const conn = new Redis(env.REDIS_URL, {
     maxRetriesPerRequest: null,
     enableReadyCheck: true,
     lazyConnect: false,
-    retryStrategy(times) {
+    retryStrategy(times: number): number {
       return Math.min(times * 500, 10_000);
     },
   });
-  conn.on('error', (err) => {
+  conn.on('error', (err: Error) => {
     logger.error({ err: err.message }, 'bullmq redis connection error');
   });
   return conn;
