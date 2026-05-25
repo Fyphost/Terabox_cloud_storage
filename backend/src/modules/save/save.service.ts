@@ -46,6 +46,16 @@ export async function enqueueSave(req: SaveRequest): Promise<EnqueueSaveResult> 
     throw new AppError('BAD_REQUEST', 'No qualities selected');
   }
 
+  // ARCHITECTURAL FIX: Enforce ONE canonical download quality per saved media.
+  // The user picks their preferred quality. Only this quality gets the source
+  // MP4 download. HLS streaming still works for all qualities, but the
+  // download endpoint serves only the canonical one.
+  //
+  // If the user already saved 720p and now picks 1080p, we update the
+  // canonical quality. The old variant stays for HLS streaming but downloads
+  // now serve the new quality.
+  const canonicalQuality = req.qualities[req.qualities.length - 1]!;
+
   // Authn integrity: JWT may carry a sub for a row that no longer exists.
   const user = await prisma.user.findUnique({ where: { id: req.userId } });
   if (!user) throw new AppError('UNAUTHORIZED', 'Sign in to save media');
@@ -63,15 +73,16 @@ export async function enqueueSave(req: SaveRequest): Promise<EnqueueSaveResult> 
     throw new AppError('NOT_FOUND', 'No matching variants for selected qualities');
   }
 
-  // 1. Upsert one SavedMedia per (user, media).
+  // 1. Upsert one SavedMedia per (user, media). Set canonical quality.
   const savedMedia = await prisma.savedMedia.upsert({
     where: { userId_mediaId: { userId: req.userId, mediaId: req.mediaId } },
-    update: {},
+    update: { canonicalQuality },
     create: {
       id: newSavedId(),
       userId: req.userId,
       mediaId: req.mediaId,
       state: 'PENDING',
+      canonicalQuality,
     },
   });
 

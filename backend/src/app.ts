@@ -15,6 +15,7 @@ import mediaRoutes from './modules/media/media.routes.js';
 import streamRoutes from './modules/stream/stream.routes.js';
 import saveRoutes from './modules/save/save.routes.js';
 import libraryRoutes from './modules/library/library.routes.js';
+import shareRoutes from './modules/share/share.routes.js';
 import adminRoutes from './modules/admin/admin.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -41,6 +42,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(streamRoutes, { prefix: '/api/v1/stream' });
   await app.register(saveRoutes, { prefix: '/api/v1/save' });
   await app.register(libraryRoutes, { prefix: '/api/v1/library' });
+  await app.register(shareRoutes, { prefix: '/api/v1/share' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
 
   app.get('/', async () => ({ name: 'fyphost', env: env.NODE_ENV }));
