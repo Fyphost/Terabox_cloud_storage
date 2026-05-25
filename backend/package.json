@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "start:api": "node dist/server.js",
     "start:worker": "node dist/worker.js",
     "dev:api": "tsx watch src/server.ts",
@@ -12,6 +12,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
+    "prisma:resolve:baseline": "prisma migrate resolve --applied 20260524000000_baseline",
+    "reconcile:archive": "tsx scripts/reconcile-archive.ts",
     "lint": "tsc --noEmit",
     "test": "vitest --run"
   },

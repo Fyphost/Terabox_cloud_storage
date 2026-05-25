@@ -124,7 +124,7 @@ export default function HlsPlayer({ src, poster, className }: Props) {
       onClick={handleSurfaceTap}
     >
       <video
-        ref={videoRef}
+        ref={videoRef as React.Ref<HTMLVideoElement>}
         poster={poster ?? undefined}
         playsInline
         controls={false}

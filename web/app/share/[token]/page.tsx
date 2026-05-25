@@ -2,22 +2,30 @@
 
 import dynamic from 'next/dynamic';
 import { useParams } from 'next/navigation';
-import { Bookmark, Download } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import MediaInfo from '@/components/media/MediaInfo';
-import SaveDialog from '@/components/media/SaveDialog';
 import PlayerSkeleton from '@/components/player/PlayerSkeleton';
-import { useMedia } from '@/hooks/use-media';
+import { useSharedMedia } from '@/hooks/use-share';
 
 const HlsPlayer = dynamic(() => import('@/components/player/HlsPlayer'), {
   ssr: false,
   loading: () => <PlayerSkeleton />,
 });
 
-export default function MediaPage() {
-  const params = useParams<{ id: string }>();
-  const id = params?.id;
-  const { data: media, isLoading, error } = useMedia(id);
+/**
+ * Public share page.
+ *
+ * Anyone holding the URL `/share/<token>` lands here. No auth required —
+ * the token IS the capability. The page hits `/api/v1/share/<token>` to
+ * get a presented Media with freshly-signed playback + download URLs, then
+ * mounts the HLS player. Inner signed URLs are short-lived (6h default);
+ * the hook refetches every 5 minutes to keep them fresh.
+ */
+export default function SharePage() {
+  const params = useParams<{ token: string }>();
+  const token = params?.token;
+  const { data, isLoading, error } = useSharedMedia(token);
 
   if (isLoading) {
     return (
@@ -28,17 +36,19 @@ export default function MediaPage() {
     );
   }
 
-  if (error || !media) {
+  if (error || !data) {
     return (
       <div className="container py-10 text-center">
         <p className="text-sm text-red-400">
-          {error instanceof Error ? error.message : 'Media not found.'}
+          {error instanceof Error
+            ? error.message
+            : 'This share link is invalid or has been revoked.'}
         </p>
       </div>
     );
   }
 
-  const qualities = media.variants.map((v) => v.quality);
+  const { media, selectedQuality } = data;
   const downloadName = media.originalFilename ?? media.name;
 
   return (
@@ -50,34 +60,19 @@ export default function MediaPage() {
           name={media.name}
           sizeBytes={media.sourceSizeBytes ?? media.sizeBytes}
           thumbnailUrl={media.thumbnailUrl}
-          qualities={qualities}
+          qualities={[selectedQuality]}
         />
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        <SaveDialog
-          media={media}
-          trigger={
-            <Button size="md" variant="primary">
-              <Bookmark className="h-4 w-4" aria-hidden /> Save
-            </Button>
-          }
-        />
         {media.sourceDownloadUrl && (
-          <Button asChild size="md" variant="secondary">
+          <Button asChild size="md" variant="primary">
             <a href={media.sourceDownloadUrl} download={downloadName} rel="noopener">
               <Download className="h-4 w-4" aria-hidden /> Download
             </a>
           </Button>
         )}
       </div>
-
-      {media.sourceState !== 'PERSISTED' && (
-        <p className="mt-2 text-xs text-muted">
-          Save this media to keep a permanent copy. Until then, downloads stream the
-          original file directly from the source.
-        </p>
-      )}
     </div>
   );
 }

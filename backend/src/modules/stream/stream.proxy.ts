@@ -13,6 +13,7 @@ import { pipeline } from 'node:stream/promises';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { upstreamRequest } from '../../lib/http.js';
 import { AppError } from '../../lib/errors.js';
+import { attachmentContentDisposition } from '../../lib/content-disposition.js';
 import type { StorageBackend } from '../../services/storage/index.js';
 
 export interface ProxyOptions {
@@ -178,10 +179,7 @@ export async function serveStored(
     reply.header('Content-Range', `bytes ${start}-${end}/${total}`);
     if (opts.cacheControl) reply.header('Cache-Control', opts.cacheControl);
     if (opts.downloadFilename) {
-      reply.header(
-        'Content-Disposition',
-        `attachment; filename="${sanitizeFilename(opts.downloadFilename)}"`,
-      );
+      reply.header('Content-Disposition', attachmentContentDisposition(opts.downloadFilename));
     }
     reply.header('X-Accel-Buffering', 'no');
     await pipeline(result.stream, reply.raw);
@@ -194,10 +192,7 @@ export async function serveStored(
   reply.header('Content-Length', String(total));
   if (opts.cacheControl) reply.header('Cache-Control', opts.cacheControl);
   if (opts.downloadFilename) {
-    reply.header(
-      'Content-Disposition',
-      `attachment; filename="${sanitizeFilename(opts.downloadFilename)}"`,
-    );
+    reply.header('Content-Disposition', attachmentContentDisposition(opts.downloadFilename));
   }
   reply.header('X-Accel-Buffering', 'no');
   await pipeline(result.stream, reply.raw);

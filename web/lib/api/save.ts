@@ -1,27 +1,25 @@
 import { apiFetch } from './client.js';
-import type { ApiSaveJob } from '@/types/api';
+import type { ApiSaveJob, ApiSaveStatus } from '@/types/api';
 
-export function saveQualities(
+/**
+ * Save the chosen quality permanently. Single-quality contract — the API
+ * enforces ONE saved media per (user, media), so re-saving with a different
+ * quality replaces the previous selection in place.
+ */
+export function saveQuality(
   mediaId: string,
-  qualities: string[],
+  quality: string,
   signal?: AbortSignal,
-): Promise<{ jobs: ApiSaveJob[] }> {
-  return apiFetch<{ jobs: ApiSaveJob[] }>('/save', {
+): Promise<ApiSaveJob> {
+  return apiFetch<ApiSaveJob>('/save', {
     method: 'POST',
-    body: { mediaId, qualities },
+    body: { mediaId, quality },
     signal,
   });
 }
 
-export interface SaveStatus {
-  savedMediaId: string;
-  variantId: string;
-  quality: string;
-  state: 'PENDING' | 'DOWNLOADING' | 'COMPLETE' | 'FAILED';
-  progress: number;
-  error: string | null;
+export function getSaveStatus(savedMediaId: string, signal?: AbortSignal): Promise<ApiSaveStatus> {
+  return apiFetch<ApiSaveStatus>(`/save/${encodeURIComponent(savedMediaId)}`, { signal });
 }
 
-export function getSaveStatus(savedMediaId: string, signal?: AbortSignal): Promise<SaveStatus> {
-  return apiFetch<SaveStatus>(`/save/${encodeURIComponent(savedMediaId)}`, { signal });
-}
+export type { ApiSaveStatus as SaveStatus };

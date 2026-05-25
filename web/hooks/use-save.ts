@@ -1,20 +1,26 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSaveStatus, saveQualities, type SaveStatus } from '@/lib/api/save';
+import { getSaveStatus, saveQuality, type SaveStatus } from '@/lib/api/save';
+import type { ApiSaveJob } from '@/types/api';
 
-export function useSaveQualities() {
+/**
+ * Single-quality save. The previous `useSaveQualities` (plural) is gone —
+ * the contract is now one save per (user, media), and re-save with a
+ * different quality replaces the previous selection.
+ */
+export function useSaveQuality() {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ mediaId, qualities }: { mediaId: string; qualities: string[] }) =>
-      saveQualities(mediaId, qualities),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['library'] }),
+  return useMutation<ApiSaveJob, Error, { mediaId: string; quality: string }>({
+    mutationFn: ({ mediaId, quality }) => saveQuality(mediaId, quality),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['library'] });
+    },
   });
 }
 
 /**
- * Polls a single save job until terminal state. Backoff is naive (2s) but
- * fine for v1; switch to SSE later for instant updates.
+ * Polls a single save job until terminal state.
  */
 export function useSaveStatus(savedMediaId: string | null | undefined) {
   return useQuery<SaveStatus>({
