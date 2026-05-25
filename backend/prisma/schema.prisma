@@ -1,10 +1,20 @@
 // Fyphost — Database schema
 //
 // Conventions:
-// - Identifiers are short prefixed strings (med_, var_, ...) generated app-side.
+// - Identifiers are short prefixed strings (med_, var_, sav_, sht_) generated app-side.
 // - Source URL deduplication via Media.sourceHash.
-// - MediaVariant.state is the canonical bytes-location state machine.
-// - SavedMedia is the per-user claim on a variant; bytes are shared.
+// - MediaVariant.state is the bytes-location state machine for the HLS *streaming*
+//   derivative of a quality.
+// - The canonical *download* artifact is the ORIGINAL source.mp4, persisted on the
+//   Media record itself (Media.sourceStorageKey). Variants are streaming derivatives,
+//   not download artifacts. This separation is the architectural fix for the
+//   "downloads serve playlist.m3u8" defect.
+// - SavedMedia is the per-user library claim. There is exactly ONE SavedMedia row
+//   per (userId, mediaId). The user's selectedQuality controls which HLS variant is
+//   pinned for playback; the download is always the canonical source.
+// - ShareToken is an opaque, permanent share link. Tokens are decoupled from
+//   signed URLs: the share endpoint mints fresh signed playback URLs on every read,
+//   so the token never expires while the saved media exists.
 
 generator client {
   provider        = "prisma-client-js"
@@ -26,17 +36,17 @@ enum UserKind {
 }
 
 model User {
-  id          String     @id
-  kind        UserKind   @default(ANON)
-  email       String?    @unique
-  displayName String?
+  id           String    @id
+  kind         UserKind  @default(ANON)
+  email        String?   @unique
+  displayName  String?
   passwordHash String?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  lastSeenAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastSeenAt   DateTime?
 
-  saved       SavedMedia[]
-  sessions    StreamSession[]
+  saved    SavedMedia[]
+  sessions StreamSession[]
 
   @@index([lastSeenAt])
 }
@@ -53,10 +63,10 @@ enum MediaKind {
 }
 
 enum VariantState {
-  EPHEMERAL       // not on disk; proxy-only
-  CACHED          // on local NVMe cache
-  PERSISTED       // in permanent storage; never auto-evicted
-  PENDING_DELETE  // marked for storage-cleanup worker
+  EPHEMERAL      // not on disk; proxy-only
+  CACHED         // on local NVMe cache
+  PERSISTED      // HLS derivative copied into permanent storage
+  PENDING_DELETE // marked for storage-cleanup worker
 }
 
 enum VariantContainer {
@@ -66,52 +76,71 @@ enum VariantContainer {
 }
 
 model Media {
-  id          String     @id
-  sourceHash  String     @unique          // sha256(normalized source URL)
-  sourceUrl   String                       // original URL, for refresh
-  name        String
-  kind        MediaKind  @default(VIDEO)
-  sizeBytes   BigInt?                      // sum of canonical variant or upstream-reported
+  id           String    @id
+  sourceHash   String    @unique // sha256(normalized source URL)
+  sourceUrl    String             // original URL, for refresh
+  name         String              // display name (mutable later)
+  // Original filename as reported by the upstream extractor. Immutable. Used
+  // verbatim for Content-Disposition on /download. Includes extension.
+  originalFilename String?
+  kind         MediaKind @default(VIDEO)
+  sizeBytes    BigInt?            // sum of canonical variant or upstream-reported
   thumbnailUrl String?
-  durationSec Int?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  durationSec  Int?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
   // last successful re-extract; URLs older than X are refreshed on demand
   metadataRefreshedAt DateTime @default(now())
 
-  variants    MediaVariant[]
+  // ── Canonical source (download artifact) ────────────────────────────────────
+  // The original MP4 (or other container) downloaded from the upstream
+  // extractor's `download` URL. This is the ONLY file served by /download.
+  // Persisted once per Media (deduplicated across users); never per-quality.
+  sourceStorageKey      String?  // e.g. "media/<mediaId>/source.mp4"
+  sourceSizeBytes       BigInt?
+  sourceSha256          String?
+  sourceContentType     String?  // e.g. "video/mp4"
+  sourcePersistedAt     DateTime?
+  sourcePendingDeleteAt DateTime? // set when last SavedMedia is removed; cleared if a save reappears
+
+  variants MediaVariant[]
+  saved    SavedMedia[]
 
   @@index([createdAt])
+  @@index([sourcePendingDeleteAt])
 }
 
 model MediaVariant {
-  id            String           @id
-  mediaId       String
-  media         Media            @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  id      String @id
+  mediaId String
+  media   Media  @relation(fields: [mediaId], references: [id], onDelete: Cascade)
 
-  quality       String                                // "360p" | "480p" | "720p" | "1080p" | "audio"
-  container     VariantContainer @default(HLS)
-  width         Int?
-  height        Int?
-  bitrateBps    Int?
-  sizeBytes     BigInt?
+  quality    String // "360p" | "480p" | "720p" | "1080p" | "audio"
+  container  VariantContainer @default(HLS)
+  width      Int?
+  height     Int?
+  bitrateBps Int?
+  sizeBytes  BigInt?
 
   // Upstream URLs (refreshable, may expire)
-  upstreamPlaylistUrl String?                          // m3u8
-  upstreamFileUrl     String?                          // direct mp4/etc
+  upstreamPlaylistUrl String? // m3u8
+  upstreamFileUrl     String? // direct mp4/etc
   upstreamRefreshedAt DateTime @default(now())
 
-  // Bytes-location state
-  state         VariantState     @default(EPHEMERAL)
-  storageKey    String?                                // path inside storage backend when PERSISTED
-  sha256        String?                                // verified on save
-  cachedBytes   BigInt           @default(0)           // current cache footprint
+  // Bytes-location state for the HLS streaming derivative.
+  // NOTE: PERSISTED here means the *HLS playlist + segments* are persisted at
+  // `storageKey`. It is NOT the canonical download artifact. Downloads always
+  // serve Media.sourceStorageKey.
+  state       VariantState @default(EPHEMERAL)
+  storageKey  String?      // canonical layout: "media/<mediaId>/hls/<quality>"
+  sha256      String?      // sha256 of the rewritten playlist (or first segment) — verification only
+  cachedBytes BigInt       @default(0) // current cache footprint
 
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  saved         SavedMedia[]
-  cacheEntries  CacheEntry[]
+  saved        SavedMedia[] @relation("SelectedVariant")
+  cacheEntries CacheEntry[]
 
   @@unique([mediaId, quality])
   @@index([state])
@@ -119,7 +148,7 @@ model MediaVariant {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Saved (user library)
+// Saved (user library) — ONE row per (userId, mediaId).
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum SavedState {
@@ -130,22 +159,56 @@ enum SavedState {
 }
 
 model SavedMedia {
-  id              String        @id
-  userId          String
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  mediaVariantId  String
-  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+  id     String @id
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  state           SavedState    @default(PENDING)
-  progress        Float         @default(0) // 0..1
-  jobId           String?                    // BullMQ job id
-  error           String?
-  createdAt       DateTime      @default(now())
-  completedAt     DateTime?
+  // The Media this save belongs to. One save per (userId, mediaId).
+  mediaId String
+  media   Media  @relation(fields: [mediaId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, mediaVariantId])
+  // The user's chosen streaming quality label, e.g. "720p". The download
+  // artifact is always the Media.sourceStorageKey original — quality only
+  // controls which HLS variant is pinned for playback.
+  selectedQuality String
+
+  // FK to the variant matching `selectedQuality`. Re-save with a different
+  // quality updates this row (no row duplication, no storage explosion).
+  selectedVariantId String?
+  selectedVariant   MediaVariant? @relation("SelectedVariant", fields: [selectedVariantId], references: [id], onDelete: SetNull)
+
+  state       SavedState @default(PENDING)
+  progress    Float      @default(0) // 0..1
+  jobId       String?    // BullMQ job id
+  error       String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  completedAt DateTime?
+
+  shareToken ShareToken?
+
+  @@unique([userId, mediaId])
   @@index([userId, createdAt])
   @@index([state])
+  @@index([selectedVariantId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Permanent share tokens — opaque, never expire while SavedMedia exists.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ShareToken {
+  token        String     @id // opaque url-safe id; `sht_<26 chars>`
+  savedMediaId String     @unique
+  savedMedia   SavedMedia @relation(fields: [savedMediaId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  revokedAt    DateTime?
+  // Soft analytics, not used for auth.
+  lastViewedAt DateTime?
+  viewCount    Int        @default(0)
+
+  @@index([savedMediaId])
+  @@index([revokedAt])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,18 +222,18 @@ enum CacheKind {
 }
 
 model CacheEntry {
-  id              String        @id
-  mediaVariantId  String
-  variant         MediaVariant  @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
+  id             String       @id
+  mediaVariantId String
+  variant        MediaVariant @relation(fields: [mediaVariantId], references: [id], onDelete: Cascade)
 
-  kind            CacheKind
-  segmentKey      String                       // "playlist" | "seg-<n>" | "file"
-  storageKey      String                       // path under storage/cache/...
-  bytes           BigInt
-  contentType     String?
+  kind        CacheKind
+  segmentKey  String  // "playlist" | "seg-<n>" | "file"
+  storageKey  String  // path under storage/cache/...
+  bytes       BigInt
+  contentType String?
 
-  createdAt       DateTime      @default(now())
-  lastAccessedAt  DateTime      @default(now())
+  createdAt      DateTime @default(now())
+  lastAccessedAt DateTime @default(now())
 
   @@unique([mediaVariantId, segmentKey])
   @@index([lastAccessedAt])
@@ -181,15 +244,15 @@ model CacheEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model StreamSession {
-  id            String        @id
-  userId        String?
-  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id             String    @id
+  userId         String?
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   mediaVariantId String
-  ip            String?
-  userAgent     String?
-  issuedAt      DateTime      @default(now())
-  expiresAt     DateTime
-  revokedAt     DateTime?
+  ip             String?
+  userAgent      String?
+  issuedAt       DateTime  @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
 
   @@index([mediaVariantId, expiresAt])
   @@index([userId])
@@ -208,7 +271,7 @@ enum QueueJobStatus {
 }
 
 model QueueJob {
-  id          String         @id   // BullMQ job id
+  id          String         @id // BullMQ job id
   queue       String
   type        String
   payloadJson String

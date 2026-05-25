@@ -15,14 +15,19 @@ import mediaRoutes from './modules/media/media.routes.js';
 import streamRoutes from './modules/stream/stream.routes.js';
 import saveRoutes from './modules/save/save.routes.js';
 import libraryRoutes from './modules/library/library.routes.js';
+import shareRoutes from './modules/share/share.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
+  // pino@9's Logger type carries methods that fastify@4's FastifyBaseLogger
+  // doesn't enumerate. Runtime is fully compatible. The cast below is the
+  // canonical workaround until we move to fastify@5 where the typings align.
   const app = Fastify({
-    logger,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    logger: logger as any,
     disableRequestLogging: false,
     trustProxy: true,
     bodyLimit: 1 * 1024 * 1024, // 1 MB; streaming routes don't read bodies
-  });
+  }) as unknown as FastifyInstance;
 
   await app.register(sensible);
   await app.register(errorHandlerPlugin);
@@ -37,6 +42,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(streamRoutes, { prefix: '/api/v1/stream' });
   await app.register(saveRoutes, { prefix: '/api/v1/save' });
   await app.register(libraryRoutes, { prefix: '/api/v1/library' });
+  await app.register(shareRoutes, { prefix: '/api/v1/share' });
 
   app.get('/', async () => ({ name: 'fyphost', env: env.NODE_ENV }));
 

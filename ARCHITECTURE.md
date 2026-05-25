@@ -836,3 +836,236 @@ no drift.
 
 `backend/` and `web/` are independent npm packages. No monorepo tooling
 required for v1 — keep it boring.
+
+
+
+---
+
+## 13. Canonical Archive Model
+
+> **Status:** correction landed in May 2026.
+> Supersedes the relevant parts of §3.7 (save), §3.6 (streaming), §4 (storage),
+> and the API surface table in §3.4. Earlier text remains for historical
+> context only — defer to this section where they conflict.
+
+### 13.1 Why the previous design failed
+
+The previous architecture treated every quality as a first-class persisted
+artifact. A "save" workflow would download HLS bytes for the chosen quality
+and write them under a per-variant prefix (`<storageKey>/playlist.m3u8`,
+`<storageKey>/seg-N.ts`). The download endpoint served `<storageKey>/file.bin`
+— a file that never existed for HLS variants, and so:
+
+- Browsers received a 404 or, in the worst case, the m3u8 itself with the URL's
+  last segment ("download") as the suggested filename. That is exactly the
+  "~200 B file named `download`" symptom users reported.
+- Multiple qualities saved for one media inflated storage and produced
+  contradictory download options.
+- "Library URLs" exposed signed URLs directly; signed URLs expire (6 h
+  default), so any copy-and-share workflow broke on the first expiry.
+- The on-disk shape (`<YYYY>/<MM>/<variantId>/`) was opaque to operations
+  and made deduplication across users impossible.
+
+### 13.2 Invariants
+
+The corrected architecture enforces these invariants — at the schema, route,
+worker, and storage layers simultaneously, so no single layer can drift:
+
+1. **One canonical download per Media.** Stored at
+   `permanent/media/<mediaId>/source.<ext>`. Computed once. Deduplicated
+   across all users who save the same source URL (via `Media.sourceHash`).
+2. **One SavedMedia row per (userId, mediaId).** Re-saving with a different
+   quality updates the row in place; previous quality is marked
+   `PENDING_DELETE` if no other user references it.
+3. **HLS derivatives are streaming-only.** They live at
+   `permanent/media/<mediaId>/hls/<quality>/playlist.m3u8 + seg-N.ts`. They
+   are never served by `/download`; they are not the source of truth for
+   any download UX.
+4. **Filenames are preserved.** `Media.originalFilename` stores the upstream
+   name with extension at first ingest, never overwritten. Downloads emit
+   RFC 6266 dual-form `Content-Disposition` so every browser respects it.
+5. **Share links are permanent.** A `ShareToken` per `SavedMedia` is opaque,
+   never expires (until explicitly revoked), and resolves to a freshly-signed
+   playback bundle on every fetch. Inner stream URLs stay short-lived; the
+   share itself does not.
+6. **Storage paths are produced by exactly one module.**
+   `backend/src/services/storage/keys.ts` is the single source of truth.
+   Every reader and every writer goes through its builders, so the variant
+   storage shape and the source storage shape can never drift again.
+
+### 13.3 Storage layout
+
+```
+storage/
+├── cache/                              # NVMe hot cache (unchanged)
+│   └── <variantId>/
+│       ├── seg-N.ts
+│       └── file.bin                    # rare; legacy direct-MP4 caching
+└── permanent/
+    └── media/
+        └── <mediaId>/
+            ├── source.<ext>            # canonical download artifact
+            ├── thumb.jpg               # reserved
+            └── hls/
+                └── <quality>/          # MediaVariant.storageKey
+                    ├── playlist.m3u8
+                    └── seg-N.ts
+```
+
+The legacy `permanent/<YYYY>/<MM>/<variantId>/...` shape is *removed*. The
+reconciliation script (§13.7) renames such directories at upgrade time.
+
+### 13.4 Schema delta (Prisma)
+
+| Model        | Field                          | Type / change                                |
+|--------------|--------------------------------|----------------------------------------------|
+| Media        | `originalFilename`             | `String?` *(new)*                            |
+| Media        | `sourceStorageKey`             | `String?` *(new)*                            |
+| Media        | `sourceSizeBytes`              | `BigInt?` *(new)*                            |
+| Media        | `sourceSha256`                 | `String?` *(new)*                            |
+| Media        | `sourceContentType`            | `String?` *(new)*                            |
+| Media        | `sourcePersistedAt`            | `DateTime?` *(new)*                          |
+| Media        | `sourcePendingDeleteAt`        | `DateTime?` *(new)*                          |
+| MediaVariant | `storageKey`                   | layout fixed: `media/<mediaId>/hls/<q>`      |
+| SavedMedia   | `mediaId`                      | `String` *(new, FK Media)*                   |
+| SavedMedia   | `selectedQuality`              | `String` *(new)*                             |
+| SavedMedia   | `selectedVariantId`            | `String?` *(new, FK MediaVariant SET NULL)*  |
+| SavedMedia   | `mediaVariantId`               | now nullable (legacy compat only)            |
+| SavedMedia   | `@@unique([userId, mediaVariantId])` | dropped                                |
+| SavedMedia   | `@@unique([userId, mediaId])`  | added                                        |
+| **ShareToken** *(new)* | `token` (PK), `savedMediaId` (unique FK CASCADE), `createdAt`, `revokedAt`, `lastViewedAt`, `viewCount` | |
+
+### 13.5 API surface delta
+
+| Method | Path                                  | Purpose                                                          |
+|--------|---------------------------------------|------------------------------------------------------------------|
+| POST   | `/api/v1/save`                        | Body `{ mediaId, quality }` (single string). Returns SaveJob with `shareToken`. |
+| GET    | `/api/v1/share/:token`                | **Public.** Resolves opaque token → presented Media + fresh signed URLs. |
+| POST   | `/api/v1/share/by-saved/:savedMediaId`| Authenticated. Get-or-mint share token (idempotent).             |
+| DELETE | `/api/v1/share/by-saved/:savedMediaId`| Authenticated. Revoke share token.                               |
+| GET    | `/api/v1/stream/:variantId/download`  | Now serves `Media.sourceStorageKey` (variantId is signing subject). RFC 6266 dual-form `Content-Disposition`. |
+| GET    | `/api/v1/media/:id`                   | Response gains `originalFilename`, `sourceDownloadUrl`, `sourceFileUrl`, `sourceState`, `sourceSizeBytes`, `sourceContentType`. Per-variant `downloadUrl` removed. |
+| GET    | `/api/v1/library`                     | Each item gains `selectedQuality`, `selectedVariantId`, `shareToken`, `shareUrl`, `updatedAt`. |
+
+Existing signed playback URLs continue to verify against the old HMAC scheme;
+the variantId in the URL becomes a pure signing subject for media-scoped
+artifacts.
+
+### 13.6 Save pipeline (corrected)
+
+```
+POST /api/v1/save  { mediaId, quality }
+  │
+  ├─ Look up MediaVariant by (mediaId, quality) → reject if missing.
+  ├─ Upsert SavedMedia by (userId, mediaId):
+  │     - new row OR update selectedQuality/selectedVariantId in place.
+  │     - mint ShareToken atomically if absent (idempotent).
+  │     - if quality changed: mark previous variant PENDING_DELETE if no
+  │       other user references it.
+  │     - clear Media.sourcePendingDeleteAt.
+  ├─ Fast-complete if Media.sourceStorageKey present AND variant.state =
+  │     'PERSISTED' AND quality unchanged.
+  └─ Otherwise enqueue BullMQ job `save:<savedMediaId>`, attempts: 5,
+                                    backoff: exponential 5 s.
+
+Worker (per-job):
+  Phase 1 — persistMediaSource(media)
+    lock:media:source:<mediaId>     (Redis SET NX PX 30 m, Lua-checked release)
+      re-extract upstream `download` URL via fetchTeraboxMetadata
+      stream → permanent/media/<mediaId>/source.<ext>
+        atomic rename, sha256, byte counter via inline Transform
+      update Media.{sourceStorageKey, sourceSizeBytes, sourceSha256,
+                    sourceContentType, sourcePersistedAt, originalFilename}
+      clear sourcePendingDeleteAt
+  Phase 2 — persistVariantHls(variant)
+    lock:variant:<variantId>
+      fetch upstream m3u8, rewrite segment URIs → relative seg-N.ts
+      write permanent/media/<mediaId>/hls/<quality>/playlist.m3u8
+      parallel-fetch segments (concurrency 4) with per-seg resume + 403/404
+        refresh+remap; idempotent on rerun.
+      update MediaVariant.{state=PERSISTED, storageKey=<canonical>}
+    Phase 2 failure is non-fatal: variant is demoted to EPHEMERAL, the
+    SavedMedia still completes (download keeps working from source.mp4),
+    and the player falls back to direct MP4.
+  Mark SavedMedia.state=COMPLETE, progress=1, completedAt=now.
+```
+
+### 13.7 Migration & reconciliation runbook
+
+Everything below assumes Postgres + Redis are reachable, and that
+`backend/.env` is correctly populated.
+
+```bash
+cd backend
+git pull
+npm ci
+
+# 1. Mark the baseline as already-applied (existing prod only). On a fresh DB,
+#    skip this step and `prisma migrate deploy` will run the baseline normally.
+npx prisma migrate resolve --applied 20260524000000_baseline
+
+# 2. Apply the additive Part-1 migration:
+npm run prisma:generate
+npm run prisma:deploy
+#    Adds Media.{sourceStorageKey, ...}, SavedMedia.{mediaId, selectedQuality,
+#    selectedVariantId, updatedAt}, and the ShareToken table — all nullable /
+#    additive. Old code keeps running.
+
+# 3. Run the reconciliation script:
+npm run reconcile:archive
+#    Steps performed (idempotent):
+#      a. Backfill SavedMedia.{mediaId, selectedQuality, selectedVariantId,
+#         updatedAt} from the joined MediaVariant.
+#      b. Dedupe (userId, mediaId): keep highest-quality survivor.
+#      c. Relocate any PERSISTED variant whose storageKey is in the legacy
+#         YYYY/MM/<variantId> shape to media/<mediaId>/hls/<quality>.
+#      d. For each Media with at least one save, stream the upstream
+#         download URL into media/<mediaId>/source.<ext>; update Media
+#         columns + originalFilename.
+#      e. Mint ShareToken for every SavedMedia that lacks one.
+#      f. Backfill Media.originalFilename = Media.name.
+#    Flags: --dry-run, --skip-source, --limit N, --media <id>.
+
+# 4. Apply Part-2 (tightening) only after Step 3 reports zero errors and the
+#    counts match expectations. Part 2 refuses to run if any SavedMedia row
+#    is still missing mediaId / selectedQuality / updatedAt.
+npm run prisma:deploy
+
+# 5. Build cleanly and reload pm2:
+npm run build         # `rm -rf dist && tsc` — never trust stale dist/
+pm2 startOrReload ecosystem.config.cjs --update-env
+```
+
+Roll-back guidance: Part 1 is reversible (drop columns / drop ShareToken),
+Part 2 is reversible only if no row was inserted with the new
+(userId, mediaId) uniqueness — keep a Postgres backup taken between steps 2
+and 4.
+
+### 13.8 Why this prevents the original drift
+
+Five layers cooperate to make the previous failure modes structurally
+impossible:
+
+1. **Schema** — the canonical download is on `Media`, not on a variant. There
+   is no place in the data model for "many qualities downloadable per save".
+2. **Storage keys** — `services/storage/keys.ts` is the only producer of
+   storage paths. A file written by anyone other than this module is a
+   review-time bug, not a runtime accident.
+3. **Routes** — `/download` reads `Media.sourceStorageKey` only. There is no
+   code path through `/download` that touches a variant's HLS bytes; you
+   would have to delete the route to reintroduce the old defect.
+4. **Worker** — phase 1 (source) and phase 2 (HLS) write to disjoint
+   prefixes. Phase 2 failure leaves the SavedMedia usable; phase 1 is the
+   gating step for completeness. No interleaving is possible.
+5. **Frontend contract** — `ApiVariant.downloadUrl` is gone. The UI
+   physically cannot wire a per-quality "download" button.
+
+### 13.9 Out of scope for this correction
+
+- Transcoding (no ffmpeg in the path). If the upstream extractor returns no
+  `download` URL, the save is rejected with a clear error rather than
+  silently degrading to HLS-as-MP4.
+- Multi-region replication of `permanent/`.
+- Per-user storage quotas / billing.
+- ShareToken capability scoping (read-only is implicit; write-via-token is
+  not on the roadmap).

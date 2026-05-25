@@ -24,3 +24,4 @@ export function permanentStorage(): StorageBackend {
 }
 
 export type { StorageBackend, ByteRange, ReadResult, WriteResult } from './storage.interface.js';
+export * from './keys.js';
