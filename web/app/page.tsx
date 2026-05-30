@@ -10,12 +10,13 @@ import Link from 'next/link';
 import { Suspense } from 'react';
 import UrlAnalyzer from '@/components/ingest/UrlAnalyzer';
 
-export default function LandingPage({
+export default async function LandingPage({
   searchParams,
 }: {
-  searchParams?: { focus?: string };
+  searchParams?: Promise<{ focus?: string }>;
 }) {
-  const autoFocus = searchParams?.focus === '1';
+  const sp = await searchParams;
+  const autoFocus = sp?.focus === '1';
 
   return (
     <div>

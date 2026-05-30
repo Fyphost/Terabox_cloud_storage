@@ -82,7 +82,8 @@ async function rawFetch<T>(path: string, opts: ApiFetchOptions): Promise<T> {
 
   // Backend returns either bare data or { ok: true, data }; we accept both.
   if (json && typeof json === 'object' && 'ok' in json && (json as { ok?: unknown }).ok === true) {
-    return ((json as { data: T }).data ?? (json as unknown)) as T;
+    const enveloped = json as { ok: true; data?: T };
+    return (enveloped.data ?? (json as unknown as T)) as T;
   }
   return json as T;
 }

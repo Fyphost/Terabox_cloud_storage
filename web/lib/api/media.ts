@@ -1,4 +1,4 @@
-import { apiFetch } from './client.js';
+import { apiFetch } from './client';
 import type { ApiMedia } from '@/types/api';
 
 export function getMedia(id: string, signal?: AbortSignal): Promise<ApiMedia> {
