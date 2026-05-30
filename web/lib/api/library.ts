@@ -1,4 +1,4 @@
-import { apiFetch } from './client.js';
+import { apiFetch } from './client';
 import type { ApiLibraryPage, ApiSavedMediaDetail } from '@/types/api';
 
 export type LibrarySort = 'recent' | 'oldest' | 'name' | 'size';

@@ -1,4 +1,4 @@
-import { apiFetch } from './client.js';
+import { apiFetch } from './client';
 
 export interface AdminQueueCounts {
   waiting: number;

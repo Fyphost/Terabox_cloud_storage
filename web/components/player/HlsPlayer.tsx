@@ -237,7 +237,7 @@ export default function HlsPlayer({ src, poster, className }: Props) {
       tabIndex={-1}
     >
       <video
-        ref={videoRef}
+        ref={videoRef as React.RefObject<HTMLVideoElement>}
         poster={poster ?? undefined}
         playsInline
         controls={false}
